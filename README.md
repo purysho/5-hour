@@ -110,10 +110,43 @@ Four properties this design exists to guarantee:
 
 ## Status
 
-Pre-implementation. Design records only.
+Foundation laid. The four guarantees above exist as code and are covered by
+tests; the pipeline that uses them does not exist yet.
 
-Next: the durable fan-out skeleton with the idempotency invariant, since every
-other component depends on it.
+**Built and tested**
+
+- Tenancy schema with row-level security, plus cross-tenant probes and a check
+  that fails the build if a migration adds a `provider_id` table without RLS
+- The exactly-once claim/resolve protocol, tested under concurrency and
+  simulated worker death
+- The instruction/data boundary, including a type that throws rather than
+  being interpolated into a prompt
+- The diff policy engine and its unified-diff parser
+- The hash-chained audit log, with tamper detection proven by tampering as a
+  superuser — bypassing the application entirely
+- An adversarial corpus of injection attempts, wired as a blocking CI gate
+
+**Not built yet**
+
+Change detection, downstream discovery, the runner sandbox, migration
+generation, the GitHub App integration, and the dashboard.
+
+## Getting started
+
+Requires Node 22+ and Postgres 16.
+
+```bash
+pnpm install
+createdb driftless_test
+DATABASE_URL=postgresql://localhost/driftless_test pnpm db:migrate
+pnpm test
+```
+
+The suite needs a live Postgres. That is deliberate: row-level security and the
+idempotency invariant are database behaviour, and mocking them would test the
+mock. Tests connect as a role that is a member of `driftless_app` rather than a
+superuser, so RLS genuinely applies — running them as a superuser would make
+every isolation assertion pass vacuously.
 
 ## Repository layout
 
@@ -121,6 +154,14 @@ other component depends on it.
 docs/
   threat-model.md      security model — read first
   adr/                 architecture decision records
+migrations/            forward-only SQL; RLS and the idempotency invariant
+src/
+  agent/untrusted.ts   instruction/data boundary (ADR-0003)
+  audit/verify.ts      chain verifier customers can run themselves (ADR-0007)
+  db/client.ts         tenant-scoped database access (ADR-0005)
+  policy/              diff parsing and policy enforcement (ADR-0003)
+test/
+  adversarial/         injection corpus — blocking CI gate
 ```
 
 ## License
