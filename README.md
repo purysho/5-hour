@@ -131,6 +131,9 @@ tests; the pipeline that uses them does not exist yet.
   letters — tested against worker death, lease expiry and concurrent workers
 - The outbound write guard: kill switch, per-installation ceilings, and the
   idempotency claim, checked in that order
+- The GitHub App credential layer: per-job single-repository token minting
+  through a signer the key never leaves, with a credential type that redacts
+  on every implicit conversion
 
 **Not built yet**
 
@@ -165,6 +168,7 @@ src/
   agent/untrusted.ts   instruction/data boundary (ADR-0003)
   audit/verify.ts      chain verifier customers can run themselves (ADR-0007)
   db/client.ts         tenant and platform database access (ADR-0005, ADR-0010)
+  github/              app auth and scoped credentials (ADR-0002)
   outbound/guard.ts    kill switch, rate ceilings, idempotency claim (ADR-0004)
   policy/              diff parsing and policy enforcement (ADR-0003)
   workflow/            durable job execution (ADR-0009)

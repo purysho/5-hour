@@ -32,7 +32,7 @@ orders every control.
 
 ## Where things stand
 
-**Done and tested** (142 tests, ~93% line coverage, live Postgres required):
+**Done and tested** (175 tests, ~94% line coverage, live Postgres required):
 
 | Area | Where |
 |---|---|
@@ -44,10 +44,12 @@ orders every control.
 | Adversarial corpus (CI gate) | `test/adversarial/corpus.test.ts` |
 | Durable job execution | `migrations/004_jobs.sql`, `src/workflow/`, `test/db/jobs.test.ts` |
 | Outbound write guard | `src/outbound/guard.ts`, `test/db/outbound-guard.test.ts` |
+| GitHub App credentials | `src/github/`, `test/github/` |
 
 **Not started:** change detection and corroboration, downstream repository
-discovery, the runner sandbox, migration generation, GitHub App integration,
-the dashboard.
+discovery, the runner sandbox, migration generation, the dashboard. The GitHub
+App credential layer exists (minting, scoping, redaction) but is not yet wired
+to a real App or to git operations.
 
 ## Non-negotiables
 
@@ -84,9 +86,12 @@ make a change pass, stop.
 
 1. ~~Durable workflow engine.~~ Done — ADR-0009 chose Postgres-backed durable
    execution; `src/workflow/` implements leased dequeue and step memoisation.
-2. **GitHub App integration** against ADR-0002: KMS-held key, per-job token
-   minting, credential helper outside the agent's reach. This is the piece
-   most likely to be done wrong under time pressure.
+2. **GitHub App integration.** Credential layer done — `src/github/` mints
+   per-job, single-repository tokens through an injected signer, caps TTL
+   locally, verifies the granted permissions against the manifest, and redacts
+   on every implicit conversion. Still to do: the git credential helper that
+   keeps the token out of the agent's environment (ADR-0002 §5), a real KMS
+   signer, and webhook ingestion.
 3. **Change detection** for one ecosystem (npm first — best metadata), with the
    multi-source corroboration ADR-0004 requires.
 4. **Downstream discovery** via public dependency data.
