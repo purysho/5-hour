@@ -123,3 +123,49 @@ CREATE POLICY opt_out_token_tenant_isolation ON opt_out_token
 
 GRANT SELECT, INSERT, UPDATE ON suppression TO driftless_app;
 GRANT SELECT, INSERT, UPDATE ON opt_out_token TO driftless_app;
+
+-- ---------------------------------------------------------------------------
+-- Resolving a token to its tenant
+--
+-- The opt-out endpoint is unauthenticated: someone arrives holding a token and
+-- nothing else. There is no session to derive tenant context from, so the
+-- token must be resolved to a provider BEFORE tenant context can exist. A
+-- genuine chicken-and-egg, not a shortcut.
+--
+-- The obvious fix — grant the platform role SELECT on this table — is wrong,
+-- and the RLS coverage test in test/db/rls.test.ts correctly rejects it. This
+-- table is tenant data: it records which repositories each provider has
+-- contacted, and providers are frequently competitors. A table-wide read would
+-- hand the platform role every provider's target list, which is exactly the
+-- disclosure ADR-0005 exists to prevent.
+--
+-- So the escape hatch is a function rather than a grant, and it is shaped to
+-- disclose the minimum the requirement needs:
+--
+--   * it takes a token HASH, so the caller must already hold the token;
+--   * it matches on the primary key, so there is no scanning or enumeration;
+--   * it returns ONLY the provider id — not the owner, not the repository,
+--     not the timestamps.
+--
+-- Learning "this token belongs to provider X" is the entire capability. It
+-- reveals nothing about any provider whose token you do not already have.
+-- Everything after the lookup runs inside the resolved tenant's context under
+-- ordinary RLS.
+-- ---------------------------------------------------------------------------
+
+CREATE FUNCTION provider_for_opt_out_token(p_token_hash text)
+RETURNS uuid
+LANGUAGE sql
+STABLE
+SECURITY DEFINER
+SET search_path = public, pg_temp
+AS $$
+  SELECT provider_id FROM opt_out_token WHERE token_hash = p_token_hash;
+$$;
+
+COMMENT ON FUNCTION provider_for_opt_out_token IS
+  'Minimal-disclosure tenant resolution for the unauthenticated opt-out endpoint. '
+  'Returns only a provider id, only for an exact token hash. See migration 005.';
+
+REVOKE ALL ON FUNCTION provider_for_opt_out_token FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION provider_for_opt_out_token TO driftless_admin;
