@@ -32,7 +32,7 @@ orders every control.
 
 ## Where things stand
 
-**Done and tested** (486 tests, live Postgres required):
+**Done and tested** (527 tests, live Postgres required):
 
 | Area | Where |
 |---|---|
@@ -58,6 +58,7 @@ orders every control.
 | Detection sweep workflow | `src/workflows/detect-changes.ts` |
 | Suppression / opt-out | `migrations/005_suppression.sql`, `src/outbound/suppression.ts` |
 | Opt-out endpoint | `src/http/opt-out.ts`, `test/http/` |
+| Webhook ingestion + apply | `src/http/webhook.ts`, `src/http/webhook-apply.ts` |
 
 **Not started:** downstream repository discovery, the runner sandbox itself,
 migration generation, the dashboard. Detection has its gate, its version
@@ -129,8 +130,9 @@ make a change pass, stop.
    locally, verifies the granted permissions against the manifest, and redacts
    on every implicit conversion. The credential helper and phase-gated broker
    are done (ADR-0011). Still to do: a real KMS signer, the unix-socket
-   transport between sandbox client and supervisor broker, and webhook
-   ingestion.
+   transport between sandbox client and supervisor broker. Webhook ingestion
+   is done — signature verification, replay claims, and the apply path that
+   makes revocation take effect.
 3. **Change detection.** Gate, semver, ranges, npm collectors, and API surface
    diffing are done. What remains: extracting an `ApiSurface` from real
    published `.d.ts` files (use the TypeScript compiler API — a regex parser
