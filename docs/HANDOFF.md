@@ -32,7 +32,7 @@ orders every control.
 
 ## Where things stand
 
-**Done and tested** (527 tests, live Postgres required):
+**Done and tested** (568 tests, live Postgres required):
 
 | Area | Where |
 |---|---|
@@ -59,6 +59,8 @@ orders every control.
 | Suppression / opt-out | `migrations/005_suppression.sql`, `src/outbound/suppression.ts` |
 | Opt-out endpoint | `src/http/opt-out.ts`, `test/http/` |
 | Webhook ingestion + apply | `src/http/webhook.ts`, `src/http/webhook-apply.ts` |
+| Config validation | `src/config.ts` |
+| HTTP server + worker lifecycle | `src/main/` |
 
 **Not started:** downstream repository discovery, the runner sandbox itself,
 migration generation, the dashboard. Detection has its gate, its version

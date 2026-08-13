@@ -16,7 +16,9 @@
     "test:coverage": "vitest run --coverage",
     "lint": "eslint .",
     "db:migrate": "node --experimental-strip-types scripts/migrate.ts",
-    "db:reset": "node --experimental-strip-types scripts/migrate.ts --reset"
+    "db:reset": "node --experimental-strip-types scripts/migrate.ts --reset",
+    "start:worker": "node --experimental-strip-types src/main/run-worker.ts",
+    "start:server": "node --experimental-strip-types src/main/run-server.ts"
   },
   "dependencies": {
     "pg": "^8.13.1"
