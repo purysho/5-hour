@@ -78,17 +78,17 @@ make a change pass, stop.
 6. **The audit log is append-only.** Corrections are new compensating entries.
    Never an UPDATE.
 7. **Driftless opens pull requests. It never merges them.**
+8. **No login role holds both `driftless_app` and `driftless_admin`.** Postgres
+   ORs together every policy for every role you are a member of, so combining
+   them silently grants cross-tenant visibility with no error and nothing to
+   see in review. See ADR-0010 — this was found by a test, not by reading the
+   code.
 9. **Neither a credential nor repository content may be a step result.** Step
    results are persisted for replay, so a token there is standing privilege in
    the database and repository content there breaks the "process, never store"
    promise — and comes back as a plain string with its untrusted marking gone.
    Acquire both inside the step that consumes them. Both types throw or redact
    on serialisation, so violating this fails loudly.
-8. **No login role holds both `driftless_app` and `driftless_admin`.** Postgres
-   ORs together every policy for every role you are a member of, so combining
-   them silently grants cross-tenant visibility with no error and nothing to
-   see in review. See ADR-0010 — this was found by a test, not by reading the
-   code.
 
 ## Next, in order
 
