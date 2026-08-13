@@ -32,7 +32,7 @@ orders every control.
 
 ## Where things stand
 
-**Done and tested** (427 tests, live Postgres required):
+**Done and tested** (444 tests, live Postgres required):
 
 | Area | Where |
 |---|---|
@@ -55,6 +55,7 @@ orders every control.
 | API surface diffing (third hard source) | `src/detect/api-surface.ts` |
 | Blast radius derivation | `src/policy/blast-radius.ts` |
 | Pull request composition | `src/forge/pull-request.ts` |
+| Detection sweep workflow | `src/workflows/detect-changes.ts` |
 
 **Not started:** downstream repository discovery, the runner sandbox itself,
 migration generation, the dashboard. Detection has its gate, its version
@@ -119,8 +120,8 @@ make a change pass, stop.
    diffing are done. What remains: extracting an `ApiSurface` from real
    published `.d.ts` files (use the TypeScript compiler API — a regex parser
    will silently mis-report on conditional types, re-exports, and overloads),
-   and a scheduled sweep turning watched packages into candidate signals via
-   `nextStableAfter`.
+   and a scheduler that enqueues `detect-changes` jobs for watched packages
+   on an interval. The sweep workflow itself is done.
 4. **Downstream discovery.** Impact classification and prioritisation are done
    in `src/discover/affected.ts`. What remains is the crawler that produces
    `RepositoryCandidate`s from public dependency data — GitHub's dependency
