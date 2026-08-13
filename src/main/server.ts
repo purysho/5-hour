@@ -1,18 +1,19 @@
 /**
  * The HTTP server.
  *
- * Deliberately tiny. It exposes exactly three things — a health check, the
- * opt-out page, and the webhook receiver — and every one of them is
- * unauthenticated by necessity. There is no admin surface here and no API;
- * anything requiring authentication does not belong on this process.
+ * Deliberately tiny. It exposes exactly four things — the public homepage, a
+ * health check, the opt-out page, and the webhook receiver — and every one of
+ * them is unauthenticated by necessity. There is no admin surface here and no
+ * API; anything requiring authentication does not belong on this process.
  *
- * Routing is hand-written rather than framework-driven. At three routes a
+ * Routing is hand-written rather than framework-driven. At four routes a
  * framework is a dependency in the most exposed process we run, in exchange
  * for saving twenty lines.
  */
 
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { handleOptOut, type OptOutDeps } from "../http/opt-out.ts";
+import { landingResponse } from "../http/landing.ts";
 import { handleWebhook, type WebhookDeps } from "../http/webhook.ts";
 import { applyForgeEvent, type ApplyDeps } from "../http/webhook-apply.ts";
 
@@ -50,6 +51,16 @@ async function handleRequest(
   const url = new URL(req.url ?? "/", "http://localhost");
   const path = url.pathname;
   const method = req.method ?? "GET";
+
+  // The public homepage, and the GitHub App's homepage URL. Served here so
+  // there is no second host to run — see src/http/landing.ts for why the page
+  // says what it says.
+  if (path === "/" && (method === "GET" || method === "HEAD")) {
+    const page = landingResponse();
+    res.writeHead(page.status, page.headers);
+    res.end(method === "HEAD" ? undefined : page.body);
+    return;
+  }
 
   if (path === "/health") {
     const ready = deps.ready();

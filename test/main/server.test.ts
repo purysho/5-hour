@@ -90,10 +90,50 @@ describe("health", () => {
   });
 });
 
+describe("the homepage", () => {
+  /**
+   * This is the GitHub App's homepage URL. A maintainer who receives an
+   * unsolicited pull request clicks through to find out who sent it, and what
+   * they find decides whether the pull request gets read or closed.
+   */
+
+  it("is served, so the app's homepage URL is not a 404", async () => {
+    const response = await request("/");
+    expect(response.status).toBe(200);
+    expect(response.body).toContain("Driftless");
+  });
+
+  it("answers how to make it stop, without an account", async () => {
+    const { body } = await request("/");
+    expect(body).toContain("opt-out link");
+    expect(body).toContain("no account");
+  });
+
+  it("states the limits that are actually enforced", async () => {
+    const { body } = await request("/");
+    expect(body).toContain("cannot merge");
+    expect(body).toContain("does not keep your code");
+  });
+
+  it("loads nothing from a third party", async () => {
+    // The most-fetched unauthenticated route we expose. A homepage that pulls
+    // a font from a CDN leaks its visitors to that CDN.
+    const { body, headers } = await request("/");
+    expect(body).not.toMatch(/https?:\/\/(?!localhost)/);
+    expect(headers.get("content-security-policy")).toContain("default-src 'none'");
+  });
+
+  it("answers HEAD without a body", async () => {
+    const response = await fetch(`${origin}/`, { method: "HEAD" });
+    expect(response.status).toBe(200);
+    expect(await response.text()).toBe("");
+  });
+});
+
 describe("routing", () => {
   it("returns 404 for unknown paths", async () => {
     expect((await request("/admin")).status).toBe(404);
-    expect((await request("/")).status).toBe(404);
+    expect((await request("/nope")).status).toBe(404);
   });
 
   it("exposes no admin or API surface", async () => {

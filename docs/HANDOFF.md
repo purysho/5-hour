@@ -32,7 +32,7 @@ orders every control.
 
 ## Where things stand
 
-**Done and tested** (568 tests, live Postgres required):
+**Done and tested** (573 tests, live Postgres required):
 
 | Area | Where |
 |---|---|
@@ -62,6 +62,7 @@ orders every control.
 | Config validation | `src/config.ts` |
 | HTTP server + worker lifecycle | `src/main/` |
 | Runnable entry points | `src/main/run-server.ts`, `src/main/run-worker.ts` |
+| Public homepage | `src/http/landing.ts` (served at `/`) |
 
 **Not started:** downstream repository discovery, the runner sandbox itself,
 migration generation, the dashboard. Detection has its gate, its version
