@@ -6,6 +6,10 @@ import {
   type ContentOrigin,
 } from "../../src/agent/untrusted.ts";
 import { evaluateDiff, type PolicyContext } from "../../src/policy/diff-policy.ts";
+import {
+  buildSandboxEnvironment,
+  isEgressAllowed,
+} from "../../src/sandbox/environment.ts";
 
 /**
  * The adversarial corpus (ADR-0003, verification).
@@ -16,8 +20,10 @@ import { evaluateDiff, type PolicyContext } from "../../src/policy/diff-policy.t
  * ── What this suite does and does not prove ──────────────────────────────────
  *
  * It exercises the deterministic layers: that hostile repository content
- * cannot reach the instruction channel (layer 1), and that a diff carrying a
- * payload is refused before a pull request is opened (layer 3).
+ * cannot reach the instruction channel (layer 1), that a diff carrying a
+ * payload is refused before a pull request is opened (layer 3), and that a
+ * fully successful injection finds no credential and no egress route
+ * (layer 4).
  *
  * It does NOT prove a model is immune to persuasion. No inference runs here.
  * That is the point of the layering in ADR-0003: the model's judgment is not
@@ -247,6 +253,57 @@ describe("layer 3 — a steered agent's output never reaches a repository", () =
       expect(decision.findings.length).toBeGreaterThan(0);
     });
   }
+});
+
+describe("layer 4 — a successful injection finds nothing and can send nothing", () => {
+  /**
+   * The assumption the whole design runs on: the model WAS persuaded. These
+   * assert that the persuasion buys the attacker nothing, because the
+   * environment holds no credential and the network has no route out.
+   */
+
+  it("gives the agent an environment with no credential in it", () => {
+    // Built from a parent process that holds every secret the system has.
+    const env = buildSandboxEnvironment({
+      jobId: "job-under-attack",
+      workspace: "/work",
+      source: {
+        PATH: "/usr/bin:/bin",
+        HOME: "/home/runner",
+        GITHUB_TOKEN: "ghs_thetokentheinjectionasksfor000000",
+        GITHUB_APP_PRIVATE_KEY: "-----BEGIN RSA PRIVATE KEY-----\nMIIE\n-----END RSA PRIVATE KEY-----",
+        DATABASE_URL: "postgresql://app:hunter2@db.internal:5432/driftless",
+        ANTHROPIC_API_KEY: "sk-ant-api03-key0000000000000000000000",
+      },
+    });
+
+    // The exfiltration target named by direct-instruction-in-comment.
+    expect(env["GITHUB_TOKEN"]).toBeUndefined();
+    expect(JSON.stringify(env)).not.toContain("ghs_");
+    expect(JSON.stringify(env)).not.toContain("PRIVATE KEY");
+    expect(JSON.stringify(env)).not.toContain("hunter2");
+  });
+
+  it("denies the exfiltration destinations the corpus asks for", () => {
+    // Every host any corpus case tries to reach.
+    for (const host of [
+      "telemetry.evil.example",
+      "collect.evil.example",
+      "registry.evil.example",
+      "evil.example",
+      // And the standard pivot from code execution to cloud credentials.
+      "169.254.169.254",
+    ]) {
+      expect(isEgressAllowed(host), `${host} was reachable`).toBe(false);
+    }
+  });
+
+  it("still permits the registries a legitimate migration needs", () => {
+    // A control that blocks the attack and the product equally is not a
+    // control, it is an outage.
+    expect(isEgressAllowed("registry.npmjs.org")).toBe(true);
+    expect(isEgressAllowed("pypi.org")).toBe(true);
+  });
 });
 
 describe("the corpus itself", () => {

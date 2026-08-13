@@ -134,6 +134,8 @@ tests; the pipeline that uses them does not exist yet.
 - The GitHub App credential layer: per-job single-repository token minting
   through a signer the key never leaves, with a credential type that redacts
   on every implicit conversion
+- The runner environment builder and egress allowlist — an allowlist rather
+  than a denylist, verified by value shape as well as by name
 
 **Not built yet**
 
@@ -171,6 +173,7 @@ src/
   github/              app auth and scoped credentials (ADR-0002)
   outbound/guard.ts    kill switch, rate ceilings, idempotency claim (ADR-0004)
   policy/              diff parsing and policy enforcement (ADR-0003)
+  sandbox/             runner environment and egress allowlist (ADR-0006)
   workflow/            durable job execution (ADR-0009)
 test/
   adversarial/         injection corpus — blocking CI gate

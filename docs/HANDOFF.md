@@ -32,7 +32,7 @@ orders every control.
 
 ## Where things stand
 
-**Done and tested** (175 tests, ~94% line coverage, live Postgres required):
+**Done and tested** (195 tests, ~94% line coverage, live Postgres required):
 
 | Area | Where |
 |---|---|
@@ -45,6 +45,7 @@ orders every control.
 | Durable job execution | `migrations/004_jobs.sql`, `src/workflow/`, `test/db/jobs.test.ts` |
 | Outbound write guard | `src/outbound/guard.ts`, `test/db/outbound-guard.test.ts` |
 | GitHub App credentials | `src/github/`, `test/github/` |
+| Sandbox environment + egress | `src/sandbox/environment.ts`, `test/sandbox/` |
 
 **Not started:** change detection and corroboration, downstream repository
 discovery, the runner sandbox, migration generation, the dashboard. The GitHub
@@ -95,8 +96,11 @@ make a change pass, stop.
 3. **Change detection** for one ecosystem (npm first — best metadata), with the
    multi-source corroboration ADR-0004 requires.
 4. **Downstream discovery** via public dependency data.
-5. **Runner sandbox** per ADR-0006. Do not ship a shared-kernel container and
-   promise to fix it later.
+5. **Runner sandbox** per ADR-0006. The environment builder and egress
+   allowlist exist and are tested; what remains is the isolation itself —
+   gVisor or Firecracker, single-use instances, the proxy that enforces the
+   allowlist. Do not ship a shared-kernel container and promise to fix it
+   later.
 6. **Migration generation**, last — it is the part that looks like the product
    but is worthless without everything above it.
 
