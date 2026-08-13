@@ -114,9 +114,10 @@ make a change pass, stop.
    `MigrationAgent` and `ForgeClient` injected; what remains is real
    implementations of those two interfaces.
 
-**Cheapest high-value item on the deferred list** (ADR-0008): a written
-incident response plan. Hours of work, and the first thing a security reviewer
-asks for.
+**If something breaks:** `docs/incident-response.md`. The one thing to
+remember is that halting outbound writes is a single UPDATE against
+`outbound_kill_switch`, needs no deploy, and consumes no idempotency claims —
+so halting early costs nothing and is always the right first move.
 
 ## Conventions
 

@@ -65,6 +65,9 @@ Then the decision records:
 [ADR-0008](docs/adr/0008-deferred-concerns.md) is worth reading early. It
 records what is deliberately *not* being built yet and what would change that.
 
+[Incident response](docs/incident-response.md) covers severities, playbooks,
+and the kill switch.
+
 ## Architecture
 
 ```

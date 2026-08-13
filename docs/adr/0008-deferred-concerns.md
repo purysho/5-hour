@@ -46,7 +46,7 @@ the same consideration as building it; the difference is only in timing.
 | Database-per-tenant isolation | RLS (ADR-0005). | Customer requiring physical isolation. Additive, not a replacement. |
 | Full accessibility audit (WCAG 2.2 AA) | Semantic markup, keyboard navigability, and contrast are requirements from the first commit — cheap when done as you go, expensive when retrofitted. No formal audit or assistive-technology testing. | Before general availability of the dashboard. |
 | Multi-region / HA | Single region. | Customer SLA requiring it, or a latency requirement measurement actually supports. |
-| Formal incident response plan | Kill switch (ADR-0004) and alerting exist. No written runbook, no declared severities, no comms plan. | First paying customer. This one is cheap and high-value — likely the first item promoted off this list. |
+| ~~Formal incident response plan~~ | **Promoted 2026-08-13** — see `docs/incident-response.md`. Severities, playbooks, and a comms posture. Was the cheapest item here and went first, as predicted. | — |
 
 ### Not deferred — built from the start
 
