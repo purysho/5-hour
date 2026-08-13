@@ -61,6 +61,7 @@ Then the decision records:
 | [0008](docs/adr/0008-deferred-concerns.md) | Deferred concerns and their triggers |
 | [0009](docs/adr/0009-postgres-backed-durable-execution.md) | Postgres-backed durable execution |
 | [0010](docs/adr/0010-role-separation-for-platform-access.md) | Separate login roles for tenant and platform access |
+| [0011](docs/adr/0011-credential-broker-phase-gating.md) | Credentials brokered outside the sandbox, gated by phase |
 
 [ADR-0008](docs/adr/0008-deferred-concerns.md) is worth reading early. It
 records what is deliberately *not* being built yet and what would change that.
@@ -115,39 +116,42 @@ Four properties this design exists to guarantee:
 
 ## Status
 
-Foundation laid. The four guarantees above exist as code and are covered by
-tests; the pipeline that uses them does not exist yet.
+The spine is built and covered by tests. What remains is largely the parts that
+must talk to the outside world.
 
 **Built and tested**
 
-- Tenancy schema with row-level security, plus cross-tenant probes and a check
-  that fails the build if a migration adds a `provider_id` table without RLS
+- Tenancy schema with row-level security, cross-tenant probes, and a check that
+  fails the build if a migration adds a `provider_id` table without RLS
 - The exactly-once claim/resolve protocol, tested under concurrency and
   simulated worker death
-- The instruction/data boundary, including a type that throws rather than
-  being interpolated into a prompt
-- The diff policy engine and its unified-diff parser
-- The hash-chained audit log, with tamper detection proven by tampering as a
-  superuser — bypassing the application entirely
-- An adversarial corpus of injection attempts, wired as a blocking CI gate
 - Durable job execution: leased dequeue, step memoisation, backoff, dead
-  letters — tested against worker death, lease expiry and concurrent workers
+  letters — tested against worker death, lease expiry, and concurrent workers
 - The outbound write guard: kill switch, per-installation ceilings, and the
   idempotency claim, checked in that order
-- The GitHub App credential layer: per-job single-repository token minting
-  through a signer the key never leaves, with a credential type that redacts
-  on every implicit conversion
-- The runner environment builder and egress allowlist — an allowlist rather
-  than a denylist, verified by value shape as well as by name
+- The instruction/data boundary — a type that throws rather than being
+  interpolated into a prompt
+- The diff policy engine and its unified-diff parser
+- The hash-chained audit log, with tamper detection proven by tampering as a
+  superuser, bypassing the application entirely
+- An adversarial corpus of injection attempts, wired as a blocking CI gate
+- GitHub App credentials: per-job single-repository minting through a signer
+  the key never leaves, with a type that redacts on every implicit conversion
+- The git credential helper and phase-gated broker — the token never enters the
+  sandbox, and the credential path is armed only during clone and push
+- The runner environment builder and egress allowlist
 - The migration workflow composing all of the above, tested end to end through
   the real queue and database with only the model and the forge injected
-- The corroboration gate: a change reaches fan-out only when independent
-  sources agree, weighted by how hard each is to forge
+- Detection: semver precedence, npm range satisfaction, registry and artifact
+  collectors, and the corroboration gate that weighs them
+- Impact classification — stranded versus exposed versus current — and fan-out
+  prioritisation
 
 **Not built yet**
 
-Change detection, downstream discovery, the runner sandbox, migration
-generation, the GitHub App integration, and the dashboard.
+The runner isolation itself (gVisor or Firecracker), migration generation, a
+real KMS signer, webhook ingestion, the dependent-repository crawler that feeds
+impact classification, and the dashboard.
 
 ## Getting started
 
