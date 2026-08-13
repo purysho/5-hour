@@ -32,7 +32,7 @@ orders every control.
 
 ## Where things stand
 
-**Done and tested** (444 tests, live Postgres required):
+**Done and tested** (467 tests, live Postgres required):
 
 | Area | Where |
 |---|---|
@@ -56,6 +56,7 @@ orders every control.
 | Blast radius derivation | `src/policy/blast-radius.ts` |
 | Pull request composition | `src/forge/pull-request.ts` |
 | Detection sweep workflow | `src/workflows/detect-changes.ts` |
+| Suppression / opt-out | `migrations/005_suppression.sql`, `src/outbound/suppression.ts` |
 
 **Not started:** downstream repository discovery, the runner sandbox itself,
 migration generation, the dashboard. Detection has its gate, its version
@@ -88,17 +89,24 @@ make a change pass, stop.
 6. **The audit log is append-only.** Corrections are new compensating entries.
    Never an UPDATE.
 7. **Driftless opens pull requests. It never merges them.**
-8. **No login role holds both `driftless_app` and `driftless_admin`.** Postgres
+8. **Suppression is checked before every outbound write, and fails closed.**
+   Every pull request body promises "one click, no account, and we will not
+   open another pull request here". `OutboundRequest.target` is required
+   rather than optional precisely so a caller cannot forget it — a bypass here
+   has no visible symptom until a maintainer complains in public. A suppressed
+   target must also consume no idempotency claim, or lifting the opt-out later
+   would find the work already claimed and silently skip it.
+9. **No login role holds both `driftless_app` and `driftless_admin`.** Postgres
    ORs together every policy for every role you are a member of, so combining
    them silently grants cross-tenant visibility with no error and nothing to
    see in review. See ADR-0010 — this was found by a test, not by reading the
    code.
-9. **The broker is never armed during `test` or `analyse`.** Repository test
+10. **The broker is never armed during `test` or `analyse`.** Repository test
    code is attacker-authored and can issue a perfectly in-scope credential
    request — every scope check passes, because none of them asks who is
    asking. Only phase gating stops it. Use `withCredentials`, never a manual
    arm/disarm pair that a thrown error can escape. See ADR-0011.
-10. **Neither a credential nor repository content may be a step result.** Step
+11. **Neither a credential nor repository content may be a step result.** Step
    results are persisted for replay, so a token there is standing privilege in
    the database and repository content there breaks the "process, never store"
    promise — and comes back as a plain string with its untrusted marking gone.

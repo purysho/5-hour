@@ -63,6 +63,8 @@ export async function adminClient(): Promise<pg.Client> {
 }
 
 export interface Fixture {
+  /** Seed slug. Forge coordinates derive from it: owner is `<slug>-consumer`. */
+  slug: string;
   providerId: string;
   consumerId: string;
   installationId: string;
@@ -118,6 +120,7 @@ export async function seedProvider(slug: string): Promise<Fixture> {
     );
 
     return {
+      slug,
       providerId,
       consumerId,
       installationId,

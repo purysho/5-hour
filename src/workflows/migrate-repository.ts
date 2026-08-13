@@ -123,12 +123,22 @@ export function migrateRepositoryWorkflow(deps: MigrationDeps) {
   ): Promise<MigrationOutcome> {
     const input = rawInput as unknown as MigrationInput;
 
-    // ── 1. Authorise before doing any work ──────────────────────────────────
-    // Kill switch, rate ceilings, then the idempotency claim (ADR-0004).
-    // Deliberately first: generating a migration costs model inference, and
-    // spending it on a write that will not happen is waste. More importantly,
-    // claiming the write before generating means a crash mid-generation still
-    // holds the claim, so a retry resumes rather than duplicating.
+    // ── 1. Load tenant context ──────────────────────────────────────────────
+    //
+    // Before authorisation, because the suppression check needs the forge
+    // coordinates to consult the opt-out list. This is a single tenant-scoped
+    // read; the expensive thing this workflow guards against spending is model
+    // inference, which still happens after the claim.
+    const loaded = await ctx.step("load-context", async () =>
+      deps.withTenant(ctx.providerId, (client) => deps.loadContext(client, input)),
+    );
+
+    // ── 2. Authorise before doing any real work ─────────────────────────────
+    // Kill switch, suppression, rate ceilings, then the idempotency claim
+    // (ADR-0004). Deliberately ahead of generation: spending model inference
+    // on a write that will not happen is waste, and claiming the write before
+    // generating means a crash mid-generation still holds the claim, so a
+    // retry resumes rather than duplicating.
     const authorisation = await ctx.step("authorise-write", async () =>
       deps.withTenant(ctx.providerId, async (client) => {
         const decision = await authoriseOutboundWrite(client, {
@@ -137,6 +147,11 @@ export function migrateRepositoryWorkflow(deps: MigrationDeps) {
           repositoryId: input.repositoryId,
           changeId: input.changeId,
           baseSha: input.baseSha,
+          target: {
+            forge: "github",
+            owner: loaded.repository.forgeOwner,
+            name: loaded.repository.forgeName,
+          },
         });
         return decision;
       }),
@@ -150,17 +165,19 @@ export function migrateRepositoryWorkflow(deps: MigrationDeps) {
           reason: `already written as PR ${authorisation.prNumber ?? "(pending)"}`,
         };
       }
+      if (authorisation.reason === "suppressed") {
+        // Someone told us to stop. That is not a transient condition and
+        // retrying it would burn the retry budget re-deciding a settled
+        // question — and, worse, treat an explicit refusal as a temporary
+        // obstacle.
+        return { status: "skipped", reason: authorisation.detail };
+      }
       // Kill switch and rate limits are transient by nature — the job should
       // come back, so this is a retryable error rather than a permanent one.
       throw new Error(`outbound write refused: ${authorisation.detail}`);
     }
 
     const writeId = authorisation.writeId;
-
-    // ── 2. Load tenant context ──────────────────────────────────────────────
-    const loaded = await ctx.step("load-context", async () =>
-      deps.withTenant(ctx.providerId, (client) => deps.loadContext(client, input)),
-    );
 
     // ── 3. Generate the migration ───────────────────────────────────────────
     //

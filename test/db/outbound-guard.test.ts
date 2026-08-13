@@ -9,6 +9,7 @@ import {
   type Fixture,
 } from "./setup.ts";
 import type { Database } from "../../src/db/client.ts";
+import { suppress } from "../../src/outbound/suppression.ts";
 import {
   authoriseOutboundWrite,
   recordOutboundResult,
@@ -23,6 +24,9 @@ import {
  * after an incident would find every write already claimed and silently skip
  * the work it was halted to protect.
  */
+
+/** Forge coordinates for the suppression check (migration 005). */
+const TARGET = { forge: "github", owner: "acme", name: "widgets" };
 
 let db: Database;
 
@@ -48,13 +52,18 @@ async function setHalted(halted: boolean, reason: string): Promise<void> {
   }
 }
 
-function request(fixture: Fixture, baseSha = SHA_A) {
+function request(
+  fixture: Fixture,
+  baseSha = SHA_A,
+  target = { forge: "github", owner: `${fixture.slug}-consumer`, name: "widgets" },
+) {
   return {
     providerId: fixture.providerId,
     installationId: fixture.installationId,
     repositoryId: fixture.repositoryId,
     changeId: fixture.changeId,
     baseSha,
+    target,
   };
 }
 
@@ -254,5 +263,102 @@ describe("input validation", () => {
         authoriseOutboundWrite(c, request(tenant, "HEAD")),
       ),
     ).rejects.toThrow(/40-character lowercase hex/);
+  });
+});
+
+describe("suppression", () => {
+  /**
+   * Every pull request body promises "one click, no account, and we will not
+   * open another pull request here". These are the tests that make that
+   * promise true rather than printed.
+   */
+
+  it("refuses a write to a repository that opted out", async () => {
+    const tenant = await seedProvider("guard-suppressed");
+    const target = { forge: "github", owner: `${tenant.slug}-consumer`, name: "widgets" };
+
+    await db.withTenant(tenant.providerId, (client) =>
+      suppress(client, tenant.providerId, { ...target, scope: "repository" }),
+    );
+
+    const decision = await db.withTenant(tenant.providerId, (client) =>
+      authoriseOutboundWrite(client, request(tenant, SHA_A, target)),
+    );
+    expect(decision.allowed).toBe(false);
+    if (decision.allowed) return;
+    expect(decision.reason).toBe("suppressed");
+  });
+
+  it("consumes no claim while suppressed, so lifting it leaves the work doable", async () => {
+    // Same reasoning as the kill switch. If a refused write consumed its
+    // claim, un-suppressing later would find the work already claimed and
+    // silently skip it — the opt-out would become permanent by accident.
+    const tenant = await seedProvider("guard-suppressed-claim");
+    const target = { forge: "github", owner: `${tenant.slug}-consumer`, name: "widgets" };
+
+    await db.withTenant(tenant.providerId, (client) =>
+      suppress(client, tenant.providerId, { ...target, scope: "repository" }),
+    );
+    await db.withTenant(tenant.providerId, (client) =>
+      authoriseOutboundWrite(client, request(tenant, SHA_A, target)),
+    );
+
+    const { rows } = await db.withTenant(tenant.providerId, (client) =>
+      client.query<{ count: string }>("SELECT count(*) FROM outbound_write"),
+    );
+    expect(Number(rows[0]!.count)).toBe(0);
+
+    // And once lifted, the write proceeds normally. Lifting is an expiry, not
+    // a deletion — the application holds no DELETE on this table, so the record
+    // that someone opted out survives them opting back in.
+    await db.withTenant(tenant.providerId, (client) =>
+      client.query("UPDATE suppression SET expires_at = now() - interval '1 second'"),
+    );
+    const after = await db.withTenant(tenant.providerId, (client) =>
+      authoriseOutboundWrite(client, request(tenant, SHA_A, target)),
+    );
+    expect(after.allowed).toBe(true);
+  });
+
+  it("is checked ahead of the rate ceilings", async () => {
+    // Ordering matters: a suppressed target must not be able to exhaust a
+    // customer's hourly ceiling with writes that were never going to happen.
+    const tenant = await seedProvider("guard-suppressed-order");
+    const target = { forge: "github", owner: `${tenant.slug}-consumer`, name: "widgets" };
+
+    await db.withTenant(tenant.providerId, async (client) => {
+      await client.query(
+        `INSERT INTO outbound_rate_limit (installation_id, provider_id, max_writes_per_hour)
+         VALUES ($1, $2, 1)`,
+        [tenant.installationId, tenant.providerId],
+      );
+      await suppress(client, tenant.providerId, { ...target, scope: "repository" });
+    });
+
+    const decision = await db.withTenant(tenant.providerId, (client) =>
+      authoriseOutboundWrite(client, request(tenant, SHA_A, target)),
+    );
+    expect(decision.allowed).toBe(false);
+    if (decision.allowed) return;
+    expect(decision.reason).toBe("suppressed");
+  });
+
+  it("honours an owner-scoped opt-out for a repository never contacted", async () => {
+    const tenant = await seedProvider("guard-suppressed-owner");
+    const target = { forge: "github", owner: `${tenant.slug}-consumer`, name: "widgets" };
+
+    await db.withTenant(tenant.providerId, (client) =>
+      suppress(client, tenant.providerId, {
+        forge: "github",
+        owner: target.owner,
+        name: "irrelevant",
+        scope: "owner",
+      }),
+    );
+
+    const decision = await db.withTenant(tenant.providerId, (client) =>
+      authoriseOutboundWrite(client, request(tenant, SHA_A, target)),
+    );
+    expect(decision.allowed).toBe(false);
   });
 });

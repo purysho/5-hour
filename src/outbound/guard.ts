@@ -1,4 +1,5 @@
 import type { TenantClient } from "../db/client.ts";
+import { checkSuppression, type SuppressionTarget } from "./suppression.ts";
 
 /**
  * The last gate before anything is written to a customer repository
@@ -10,16 +11,26 @@ import type { TenantClient } from "../db/client.ts";
  * increasing order of cost:
  *
  *   1. the global kill switch    — stop everything, no deploy required
- *   2. per-installation ceilings — bound the damage to one customer
- *   3. the idempotency claim     — the exactly-once guarantee itself
+ *   2. suppression               — someone told us to stop; that is final
+ *   3. per-installation ceilings — bound the damage to one customer
+ *   4. the idempotency claim     — the exactly-once guarantee itself
  *
- * Order matters. A halted system must not consume claims, or resuming after an
- * incident would find every write already claimed and silently skip the work.
+ * Order matters, and each position is deliberate.
+ *
+ * A halted system must not consume claims, or resuming after an incident would
+ * find every write already claimed and silently skip the work.
+ *
+ * Suppression sits second, above the ceilings and above the claim, because it
+ * is the only check whose subject is a person rather than a system. Every pull
+ * request we open promises "one click, no account, and we will not open
+ * another pull request here"; a suppressed target must not consume a claim
+ * either, so that lifting a suppression later leaves the work still doable.
  */
 
 export type OutboundDecision =
   | { allowed: true; writeId: string; attempts: number }
   | { allowed: false; reason: "kill-switch"; detail: string }
+  | { allowed: false; reason: "suppressed"; detail: string }
   | { allowed: false; reason: "rate-limit"; detail: string }
   | {
       allowed: false;
@@ -36,6 +47,12 @@ export interface OutboundRequest {
   readonly repositoryId: string;
   readonly changeId: string;
   readonly baseSha: string;
+  /**
+   * Forge coordinates, needed to consult the opt-out list. Required rather
+   * than optional: a caller that forgets it would silently bypass suppression,
+   * and that failure has no visible symptom until a maintainer complains.
+   */
+  readonly target: SuppressionTarget;
 }
 
 const SHA_RE = /^[0-9a-f]{40}$/;
@@ -56,6 +73,21 @@ export async function authoriseOutboundWrite(
       allowed: false,
       reason: "kill-switch",
       detail: halt.rows[0].reason ?? "outbound writes are globally halted",
+    };
+  }
+
+  // Fails closed on error, like everything else here — but for a different
+  // reason. Wrongly suppressing costs one pull request we do not open;
+  // wrongly not suppressing breaks an explicit promise to someone who already
+  // told us to stop. Those costs are not comparable.
+  const suppression = await checkSuppression(client, request.target);
+  if (suppression.suppressed) {
+    return {
+      allowed: false,
+      reason: "suppressed",
+      detail:
+        `${suppression.scope}-scoped opt-out recorded ${suppression.since}; ` +
+        `no further pull requests will be opened here`,
     };
   }
 

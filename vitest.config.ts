@@ -6,11 +6,20 @@ export default defineConfig({
     // Schema reset and role creation happen once, before any worker starts.
     // Per-file setup would race across worker threads.
     globalSetup: ["test/global-setup.ts"],
-    // Database-backed tests share one Postgres instance and manipulate
-    // session-level tenant context. Running them in parallel across threads
-    // is safe (separate connections) but tests that assert on global table
-    // state are marked sequential individually.
     pool: "threads",
+    // Test FILES run one at a time.
+    //
+    // The suite shares a single Postgres instance by design (ADR-0004,
+    // ADR-0005 — mocking the database would test the mock). Most state is
+    // tenant-scoped and safe to run in parallel, but some is deliberately
+    // global: `outbound_kill_switch` is one row for the whole platform, so a
+    // file that halts it changes what every other file sees.
+    //
+    // That produced a genuine, order-dependent flake. Serialising files costs
+    // about a second on a four-second suite, which is a trade worth making —
+    // the alternative is per-test advisory locking that every future test
+    // would have to remember to use.
+    fileParallelism: false,
     coverage: {
       provider: "v8",
       include: ["src/**/*.ts"],

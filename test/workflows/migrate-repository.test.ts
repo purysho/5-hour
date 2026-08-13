@@ -13,6 +13,7 @@ import { GitHubApp, type AuditSink, type HttpClient } from "../../src/github/app
 import { LocalSigner } from "../../src/github/signer.ts";
 import { ScopedToken } from "../../src/github/token.ts";
 import { Queue } from "../../src/workflow/queue.ts";
+import { suppress } from "../../src/outbound/suppression.ts";
 import {
   migrateRepositoryWorkflow,
   type ForgeClient,
@@ -423,5 +424,71 @@ describe("the kill switch stops the pipeline", () => {
         await reset.end();
       }
     }
+  });
+});
+
+describe("suppression in the pipeline", () => {
+  it("skips a suppressed repository without spending inference or reaching the forge", async () => {
+    // End to end: someone clicked the opt-out link in an earlier pull request.
+    // The job runs, finds the suppression, and stops — no model call, no pull
+    // request, and no retry, because an opt-out is not a transient condition.
+    const tenant = await seedProvider("wf-suppressed");
+
+    let generated = 0;
+    const deps = buildDeps({
+      agent: {
+        generate: async () => {
+          generated += 1;
+          return { diff: CLEAN_DIFF, blastRadius: ["src/client.ts"] };
+        },
+      } as never,
+    });
+
+    await db.withTenant(tenant.providerId, (client) =>
+      // Matches the forge coordinates buildDeps' loadContext returns — the
+      // suppression check reads them from repository context, not from the
+      // seeded row.
+      suppress(client, tenant.providerId, {
+        forge: "github",
+        owner: "acme",
+        name: "widgets",
+        scope: "repository",
+      }),
+    );
+
+    const { status, outcome } = await runWorkflow(tenant, deps);
+
+    expect(status).toBe("succeeded");
+    expect(outcome?.status).toBe("skipped");
+    if (outcome?.status !== "skipped") return;
+    expect(outcome.reason).toContain("opt-out");
+    expect(generated).toBe(0);
+    expect(deps.forgeCalls).toHaveLength(0);
+  });
+
+  it("opens no outbound write row for a suppressed repository", async () => {
+    // The claim must not be consumed, so lifting the opt-out later leaves the
+    // work still doable rather than silently already-claimed.
+    const tenant = await seedProvider("wf-suppressed-claim");
+    const deps = buildDeps();
+
+    await db.withTenant(tenant.providerId, (client) =>
+      // Matches the forge coordinates buildDeps' loadContext returns — the
+      // suppression check reads them from repository context, not from the
+      // seeded row.
+      suppress(client, tenant.providerId, {
+        forge: "github",
+        owner: "acme",
+        name: "widgets",
+        scope: "repository",
+      }),
+    );
+
+    await runWorkflow(tenant, deps);
+
+    const { rows } = await db.withTenant(tenant.providerId, (client) =>
+      client.query<{ count: string }>("SELECT count(*) FROM outbound_write"),
+    );
+    expect(Number(rows[0]!.count)).toBe(0);
   });
 });
