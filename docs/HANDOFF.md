@@ -32,7 +32,7 @@ orders every control.
 
 ## Where things stand
 
-**Done and tested** (318 tests, live Postgres required):
+**Done and tested** (401 tests, live Postgres required):
 
 | Area | Where |
 |---|---|
@@ -51,6 +51,9 @@ orders every control.
 | Change corroboration + canary sizing | `src/detect/corroborate.ts`, `test/detect/` |
 | Semver precedence + breaking detection | `src/detect/semver.ts` |
 | npm registry + artifact collectors | `src/detect/npm.ts` |
+| Range satisfaction + impact classification | `src/detect/range.ts`, `src/discover/affected.ts` |
+| API surface diffing (third hard source) | `src/detect/api-surface.ts` |
+| Blast radius derivation | `src/policy/blast-radius.ts` |
 
 **Not started:** downstream repository discovery, the runner sandbox itself,
 migration generation, the dashboard. Detection has its gate, its version
@@ -111,11 +114,16 @@ make a change pass, stop.
    are done (ADR-0011). Still to do: a real KMS signer, the unix-socket
    transport between sandbox client and supervisor broker, and webhook
    ingestion.
-3. **Change detection.** Gate, semver, and npm registry/artifact collectors
-   are done. What remains: a type-definition diff collector (the third hard
-   source), and a scheduled sweep that turns "packages we watch" into
-   candidate `ChangeSignal`s via `nextStableAfter`.
-4. **Downstream discovery** via public dependency data.
+3. **Change detection.** Gate, semver, ranges, npm collectors, and API surface
+   diffing are done. What remains: extracting an `ApiSurface` from real
+   published `.d.ts` files (use the TypeScript compiler API — a regex parser
+   will silently mis-report on conditional types, re-exports, and overloads),
+   and a scheduled sweep turning watched packages into candidate signals via
+   `nextStableAfter`.
+4. **Downstream discovery.** Impact classification and prioritisation are done
+   in `src/discover/affected.ts`. What remains is the crawler that produces
+   `RepositoryCandidate`s from public dependency data — GitHub's dependency
+   graph, registry dependents, or code search.
 5. **Runner sandbox** per ADR-0006. The environment builder and egress
    allowlist exist and are tested; what remains is the isolation itself —
    gVisor or Firecracker, single-use instances, the proxy that enforces the
