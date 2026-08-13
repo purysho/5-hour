@@ -1,0 +1,95 @@
+# ---------------------------------------------------------------------------
+# Secrets and credentials
+#
+# This is the first file in the repository, committed before any other, so that
+# no credential ever has a window in which it could be staged by accident.
+# Nothing matching these patterns may ever be committed, including "examples"
+# with real values substituted in.
+# ---------------------------------------------------------------------------
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.pfx
+*.jks
+*.keystore
+id_rsa
+id_ed25519
+*.gpg
+*.asc
+credentials.json
+service-account*.json
+gha-private-key*
+github-app-*.private-key.pem
+secrets/
+.secrets/
+
+# Local state that may contain tenant data
+*.sqlite
+*.sqlite3
+*.db
+/tmp/
+/scratch/
+/clones/
+/workdir/
+
+# ---------------------------------------------------------------------------
+# Dependencies and build output
+# ---------------------------------------------------------------------------
+node_modules/
+dist/
+build/
+out/
+.next/
+.turbo/
+coverage/
+*.tsbuildinfo
+
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
+target/
+
+# ---------------------------------------------------------------------------
+# Infrastructure
+# ---------------------------------------------------------------------------
+.terraform/
+*.tfstate
+*.tfstate.*
+*.tfvars
+!*.tfvars.example
+.terraformrc
+terraform.rc
+
+# ---------------------------------------------------------------------------
+# Tooling, editors, OS
+# ---------------------------------------------------------------------------
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/*
+!.vscode/extensions.json
+!.vscode/settings.shared.json
+*.swp
+*.swo
+.direnv/
+.tool-versions.local
+
+# ---------------------------------------------------------------------------
+# Logs
+#
+# Logs may contain repository content or token fragments. They never belong in
+# version control, even redacted.
+# ---------------------------------------------------------------------------
+*.log
+logs/
+npm-debug.log*
+yarn-error.log*
+pnpm-debug.log*
