@@ -32,7 +32,7 @@ orders every control.
 
 ## Where things stand
 
-**Done and tested** (195 tests, ~94% line coverage, live Postgres required):
+**Done and tested** (205 tests, 95% line coverage, live Postgres required):
 
 | Area | Where |
 |---|---|
@@ -46,6 +46,7 @@ orders every control.
 | Outbound write guard | `src/outbound/guard.ts`, `test/db/outbound-guard.test.ts` |
 | GitHub App credentials | `src/github/`, `test/github/` |
 | Sandbox environment + egress | `src/sandbox/environment.ts`, `test/sandbox/` |
+| End-to-end migration workflow | `src/workflows/migrate-repository.ts`, `test/workflows/` |
 
 **Not started:** change detection and corroboration, downstream repository
 discovery, the runner sandbox, migration generation, the dashboard. The GitHub
@@ -77,6 +78,12 @@ make a change pass, stop.
 6. **The audit log is append-only.** Corrections are new compensating entries.
    Never an UPDATE.
 7. **Driftless opens pull requests. It never merges them.**
+9. **Neither a credential nor repository content may be a step result.** Step
+   results are persisted for replay, so a token there is standing privilege in
+   the database and repository content there breaks the "process, never store"
+   promise — and comes back as a plain string with its untrusted marking gone.
+   Acquire both inside the step that consumes them. Both types throw or redact
+   on serialisation, so violating this fails loudly.
 8. **No login role holds both `driftless_app` and `driftless_admin`.** Postgres
    ORs together every policy for every role you are a member of, so combining
    them silently grants cross-tenant visibility with no error and nothing to
@@ -102,7 +109,10 @@ make a change pass, stop.
    allowlist. Do not ship a shared-kernel container and promise to fix it
    later.
 6. **Migration generation**, last — it is the part that looks like the product
-   but is worthless without everything above it.
+   but is worthless without everything above it. The workflow that composes
+   everything already exists in `src/workflows/migrate-repository.ts` with
+   `MigrationAgent` and `ForgeClient` injected; what remains is real
+   implementations of those two interfaces.
 
 **Cheapest high-value item on the deferred list** (ADR-0008): a written
 incident response plan. Hours of work, and the first thing a security reviewer

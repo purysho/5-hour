@@ -136,6 +136,8 @@ tests; the pipeline that uses them does not exist yet.
   on every implicit conversion
 - The runner environment builder and egress allowlist — an allowlist rather
   than a denylist, verified by value shape as well as by name
+- The migration workflow composing all of the above, tested end to end through
+  the real queue and database with only the model and the forge injected
 
 **Not built yet**
 
@@ -174,6 +176,7 @@ src/
   outbound/guard.ts    kill switch, rate ceilings, idempotency claim (ADR-0004)
   policy/              diff parsing and policy enforcement (ADR-0003)
   sandbox/             runner environment and egress allowlist (ADR-0006)
+  workflows/           the migration pipeline
   workflow/            durable job execution (ADR-0009)
 test/
   adversarial/         injection corpus — blocking CI gate
