@@ -45,6 +45,7 @@ orders every control.
 | Durable job execution | `migrations/004_jobs.sql`, `src/workflow/`, `test/db/jobs.test.ts` |
 | Outbound write guard | `src/outbound/guard.ts`, `test/db/outbound-guard.test.ts` |
 | GitHub App credentials | `src/github/`, `test/github/` |
+| Credential broker + git helper | `src/github/credential-{helper,broker}.ts` |
 | Sandbox environment + egress | `src/sandbox/environment.ts`, `test/sandbox/` |
 | End-to-end migration workflow | `src/workflows/migrate-repository.ts`, `test/workflows/` |
 | Change corroboration + canary sizing | `src/detect/corroborate.ts`, `test/detect/` |
@@ -84,7 +85,12 @@ make a change pass, stop.
    them silently grants cross-tenant visibility with no error and nothing to
    see in review. See ADR-0010 — this was found by a test, not by reading the
    code.
-9. **Neither a credential nor repository content may be a step result.** Step
+9. **The broker is never armed during `test` or `analyse`.** Repository test
+   code is attacker-authored and can issue a perfectly in-scope credential
+   request — every scope check passes, because none of them asks who is
+   asking. Only phase gating stops it. Use `withCredentials`, never a manual
+   arm/disarm pair that a thrown error can escape. See ADR-0011.
+10. **Neither a credential nor repository content may be a step result.** Step
    results are persisted for replay, so a token there is standing privilege in
    the database and repository content there breaks the "process, never store"
    promise — and comes back as a plain string with its untrusted marking gone.
@@ -98,9 +104,10 @@ make a change pass, stop.
 2. **GitHub App integration.** Credential layer done — `src/github/` mints
    per-job, single-repository tokens through an injected signer, caps TTL
    locally, verifies the granted permissions against the manifest, and redacts
-   on every implicit conversion. Still to do: the git credential helper that
-   keeps the token out of the agent's environment (ADR-0002 §5), a real KMS
-   signer, and webhook ingestion.
+   on every implicit conversion. The credential helper and phase-gated broker
+   are done (ADR-0011). Still to do: a real KMS signer, the unix-socket
+   transport between sandbox client and supervisor broker, and webhook
+   ingestion.
 3. **Change detection** for one ecosystem (npm first — best metadata). The
    corroboration gate and canary sizing exist in `src/detect/corroborate.ts`;
    what remains is the collectors that produce `Corroboration` records from

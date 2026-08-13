@@ -10,6 +10,11 @@ import {
   buildSandboxEnvironment,
   isEgressAllowed,
 } from "../../src/sandbox/environment.ts";
+import {
+  CredentialAccessViolation,
+  CredentialBroker,
+} from "../../src/github/credential-broker.ts";
+import { ScopedToken, REQUIRED_PERMISSIONS } from "../../src/github/token.ts";
 
 /**
  * The adversarial corpus (ADR-0003, verification).
@@ -303,6 +308,70 @@ describe("layer 4 — a successful injection finds nothing and can send nothing"
     // control, it is an outage.
     expect(isEgressAllowed("registry.npmjs.org")).toBe(true);
     expect(isEgressAllowed("pypi.org")).toBe(true);
+  });
+});
+
+describe("layer 4 — a steered agent finds no credential to take", () => {
+  /**
+   * The local-invocation attack (ADR-0011). Attacker-authored code in the
+   * repository's test suite issues a perfectly in-scope credential request.
+   * Every scope check in credential-helper.ts passes, because none of them
+   * was ever about who is asking.
+   *
+   * Only phase gating answers this, so it is asserted here rather than left
+   * to the broker's own unit tests: this is the file that is meant to fail
+   * loudly if the defence is ever "simplified" away.
+   */
+  function armedBroker(phase: "test" | "analyse" | "push") {
+    const token = new ScopedToken(
+      "ghs_CORPUSvalue000000000000000000000000",
+      {
+        repositoryId: "repo-1",
+        installationId: "inst-1",
+        permissions: REQUIRED_PERMISSIONS,
+      },
+      new Date(Date.now() + 300_000),
+      "tok_corpus",
+    );
+    const broker = new CredentialBroker(token, {
+      host: "github.com",
+      repositoryPath: "acme/widgets",
+    });
+    broker.enterPhase(phase);
+    return broker;
+  }
+
+  const IN_SCOPE_REQUEST = {
+    protocol: "https",
+    host: "github.com",
+    path: "acme/widgets",
+  };
+
+  it("credential-helper-invocation: refuses an in-scope request during test execution", () => {
+    expect(() => armedBroker("test").handle("get", IN_SCOPE_REQUEST)).toThrow(
+      CredentialAccessViolation,
+    );
+  });
+
+  it("credential-helper-invocation: refuses during analysis too", () => {
+    expect(() => armedBroker("analyse").handle("get", IN_SCOPE_REQUEST)).toThrow(
+      CredentialAccessViolation,
+    );
+  });
+
+  it("submodule-redirect: refuses a different repository even while armed", () => {
+    const outcome = armedBroker("push").handle("get", {
+      ...IN_SCOPE_REQUEST,
+      path: "attacker/collector",
+    });
+    expect(outcome.kind).toBe("refused");
+  });
+
+  it("every corpus payload's exfiltration route is closed", () => {
+    // Egress allowlisting is the backstop when a payload does get generated.
+    for (const host of ["telemetry.evil.example", "registry.evil.example", "evil.example"]) {
+      expect(isEgressAllowed(host), host).toBe(false);
+    }
   });
 });
 
