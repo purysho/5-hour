@@ -80,14 +80,14 @@ export interface AuditSink {
 
 export class TokenMintError extends Error {
   override readonly name = "TokenMintError";
-  constructor(
-    message: string,
-    readonly status: number,
-  ) {
+  readonly status: number;
+
+  constructor(message: string, status: number) {
     // Redacted at the constructor, not at the log sink. An error object
     // travels — to an error tracker, into a job's last_error column, into a
     // support ticket — and scrubbing at every destination is a losing game.
     super(redactSecrets(message));
+    this.status = status;
   }
 }
 

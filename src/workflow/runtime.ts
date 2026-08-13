@@ -28,10 +28,17 @@ export interface StepRecorder {
 }
 
 export class PostgresStepRecorder implements StepRecorder {
-  constructor(private readonly client: TenantClient) {}
+  // Explicit field rather than a constructor parameter property: those
+  // require transformation, and this project runs under
+  // `node --experimental-strip-types`, which only erases types.
+  readonly #client: TenantClient;
+
+  constructor(client: TenantClient) {
+    this.#client = client;
+  }
 
   async lookup(jobId: string, stepKey: string): Promise<{ result: unknown } | null> {
-    const { rows } = await this.client.query<{ result: unknown }>(
+    const { rows } = await this.#client.query<{ result: unknown }>(
       "SELECT result FROM job_step WHERE job_id = $1 AND step_key = $2",
       [jobId, stepKey],
     );
@@ -45,7 +52,7 @@ export class PostgresStepRecorder implements StepRecorder {
     result: unknown,
     attempt: number,
   ): Promise<{ recorded: boolean; result: unknown }> {
-    const { rows } = await this.client.query<{ recorded: boolean; result: unknown }>(
+    const { rows } = await this.#client.query<{ recorded: boolean; result: unknown }>(
       "SELECT * FROM record_job_step($1, $2, $3, $4, $5)",
       [jobId, providerId, stepKey, JSON.stringify(result ?? null), attempt],
     );

@@ -37,13 +37,16 @@ export interface KmsClient {
 }
 
 export class KmsSigner implements Signer {
-  constructor(
-    private readonly kms: KmsClient,
-    readonly keyId: string,
-  ) {}
+  readonly #kms: KmsClient;
+  readonly keyId: string;
+
+  constructor(kms: KmsClient, keyId: string) {
+    this.#kms = kms;
+    this.keyId = keyId;
+  }
 
   sign(data: Buffer): Promise<Buffer> {
-    return this.kms.sign(this.keyId, data);
+    return this.#kms.sign(this.keyId, data);
   }
 }
 

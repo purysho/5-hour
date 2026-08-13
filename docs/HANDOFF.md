@@ -61,6 +61,7 @@ orders every control.
 | Webhook ingestion + apply | `src/http/webhook.ts`, `src/http/webhook-apply.ts` |
 | Config validation | `src/config.ts` |
 | HTTP server + worker lifecycle | `src/main/` |
+| Runnable entry points | `src/main/run-server.ts`, `src/main/run-worker.ts` |
 
 **Not started:** downstream repository discovery, the runner sandbox itself,
 migration generation, the dashboard. Detection has its gate, its version
@@ -160,6 +161,31 @@ make a change pass, stop.
 remember is that halting outbound writes is a single UPDATE against
 `outbound_kill_switch`, needs no deploy, and consumes no idempotency claims —
 so halting early costs nothing and is always the right first move.
+
+## Running it
+
+```bash
+scripts/dev-postgres.sh          # sandbox/laptop Postgres
+pnpm db:migrate
+pnpm start:server                # opt-out page + webhook receiver
+pnpm start:worker                # job runner
+```
+
+Configuration is validated at startup and the process refuses to boot on any
+problem — including `GITHUB_PRIVATE_KEY` being set at all, which means the
+signing key has been exposed to the environment and needs rotating.
+
+`run-worker.ts` deliberately registers only `detect-changes`. Registering
+`migrate-repository` without real `MigrationAgent` and `ForgeClient`
+implementations would dequeue real jobs and burn their retry budget failing
+for reasons unrelated to the job. Queued is recoverable;
+failed-and-retried-to-death is not.
+
+**Source must stay strip-mode compatible.** The project runs under
+`node --experimental-strip-types`, which erases types but does not transform
+code. No TypeScript parameter properties (`constructor(private readonly x: T)`),
+no enums, no namespaces, no decorators. Vitest transpiles, so the test suite
+will not catch a violation — only actually running a process will.
 
 ## Conventions
 
