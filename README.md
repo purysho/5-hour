@@ -141,6 +141,8 @@ tests; the pipeline that uses them does not exist yet.
   than a denylist, verified by value shape as well as by name
 - The migration workflow composing all of the above, tested end to end through
   the real queue and database with only the model and the forge injected
+- The corroboration gate: a change reaches fan-out only when independent
+  sources agree, weighted by how hard each is to forge
 
 **Not built yet**
 
@@ -179,6 +181,7 @@ src/
   outbound/guard.ts    kill switch, rate ceilings, idempotency claim (ADR-0004)
   policy/              diff parsing and policy enforcement (ADR-0003)
   sandbox/             runner environment and egress allowlist (ADR-0006)
+  detect/              change corroboration and canary sizing (§5.2)
   workflows/           the migration pipeline
   workflow/            durable job execution (ADR-0009)
 test/

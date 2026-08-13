@@ -32,7 +32,7 @@ orders every control.
 
 ## Where things stand
 
-**Done and tested** (205 tests, 95% line coverage, live Postgres required):
+**Done and tested** (222 tests, live Postgres required):
 
 | Area | Where |
 |---|---|
@@ -47,6 +47,7 @@ orders every control.
 | GitHub App credentials | `src/github/`, `test/github/` |
 | Sandbox environment + egress | `src/sandbox/environment.ts`, `test/sandbox/` |
 | End-to-end migration workflow | `src/workflows/migrate-repository.ts`, `test/workflows/` |
+| Change corroboration + canary sizing | `src/detect/corroborate.ts`, `test/detect/` |
 
 **Not started:** change detection and corroboration, downstream repository
 discovery, the runner sandbox, migration generation, the dashboard. The GitHub
@@ -100,8 +101,10 @@ make a change pass, stop.
    on every implicit conversion. Still to do: the git credential helper that
    keeps the token out of the agent's environment (ADR-0002 §5), a real KMS
    signer, and webhook ingestion.
-3. **Change detection** for one ecosystem (npm first — best metadata), with the
-   multi-source corroboration ADR-0004 requires.
+3. **Change detection** for one ecosystem (npm first — best metadata). The
+   corroboration gate and canary sizing exist in `src/detect/corroborate.ts`;
+   what remains is the collectors that produce `Corroboration` records from
+   the npm registry, published artifacts, and type-definition diffs.
 4. **Downstream discovery** via public dependency data.
 5. **Runner sandbox** per ADR-0006. The environment builder and egress
    allowlist exist and are tested; what remains is the isolation itself —
