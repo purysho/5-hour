@@ -32,7 +32,7 @@ orders every control.
 
 ## Where things stand
 
-**Done and tested** (401 tests, live Postgres required):
+**Done and tested** (427 tests, live Postgres required):
 
 | Area | Where |
 |---|---|
@@ -54,6 +54,7 @@ orders every control.
 | Range satisfaction + impact classification | `src/detect/range.ts`, `src/discover/affected.ts` |
 | API surface diffing (third hard source) | `src/detect/api-surface.ts` |
 | Blast radius derivation | `src/policy/blast-radius.ts` |
+| Pull request composition | `src/forge/pull-request.ts` |
 
 **Not started:** downstream repository discovery, the runner sandbox itself,
 migration generation, the dashboard. Detection has its gate, its version
