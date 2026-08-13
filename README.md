@@ -39,8 +39,8 @@ formality — see [ADR-0002](docs/adr/0002-zero-standing-privilege.md).
 
 ## Where to start reading
 
-This repository currently contains design, not implementation. Decisions are
-being recorded before the code that depends on them.
+Decisions are recorded before the code that depends on them, so the ADRs are
+the map.
 
 **Start with the [threat model](docs/threat-model.md).** It is the most
 important document here. Driftless holds write access to repositories it does
@@ -59,6 +59,8 @@ Then the decision records:
 | [0006](docs/adr/0006-sandboxed-execution.md) | Sandboxed execution of untrusted code |
 | [0007](docs/adr/0007-tamper-evident-audit-log.md) | Tamper-evident audit log |
 | [0008](docs/adr/0008-deferred-concerns.md) | Deferred concerns and their triggers |
+| [0009](docs/adr/0009-postgres-backed-durable-execution.md) | Postgres-backed durable execution |
+| [0010](docs/adr/0010-role-separation-for-platform-access.md) | Separate login roles for tenant and platform access |
 
 [ADR-0008](docs/adr/0008-deferred-concerns.md) is worth reading early. It
 records what is deliberately *not* being built yet and what would change that.
@@ -125,6 +127,10 @@ tests; the pipeline that uses them does not exist yet.
 - The hash-chained audit log, with tamper detection proven by tampering as a
   superuser — bypassing the application entirely
 - An adversarial corpus of injection attempts, wired as a blocking CI gate
+- Durable job execution: leased dequeue, step memoisation, backoff, dead
+  letters — tested against worker death, lease expiry and concurrent workers
+- The outbound write guard: kill switch, per-installation ceilings, and the
+  idempotency claim, checked in that order
 
 **Not built yet**
 
@@ -158,8 +164,10 @@ migrations/            forward-only SQL; RLS and the idempotency invariant
 src/
   agent/untrusted.ts   instruction/data boundary (ADR-0003)
   audit/verify.ts      chain verifier customers can run themselves (ADR-0007)
-  db/client.ts         tenant-scoped database access (ADR-0005)
+  db/client.ts         tenant and platform database access (ADR-0005, ADR-0010)
+  outbound/guard.ts    kill switch, rate ceilings, idempotency claim (ADR-0004)
   policy/              diff parsing and policy enforcement (ADR-0003)
+  workflow/            durable job execution (ADR-0009)
 test/
   adversarial/         injection corpus — blocking CI gate
 ```

@@ -34,15 +34,28 @@ export default async function setup(): Promise<void> {
     // A login role that is a member of driftless_app, mirroring how
     // production connects. Tests must not run as a superuser: RLS would be
     // bypassed and every isolation assertion would pass vacuously.
-    await admin.query(`
-      DO $$ BEGIN
-        IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'driftless_app_login') THEN
-          CREATE ROLE driftless_app_login LOGIN INHERIT NOBYPASSRLS;
-        END IF;
-      END $$;
-    `);
-    await admin.query("GRANT driftless_app TO driftless_app_login");
-    await admin.query("GRANT CONNECT ON DATABASE driftless_test TO driftless_app_login");
+    // TWO login roles, never one holding both grants.
+    //
+    // Postgres applies every policy attached to any role the current user is a
+    // member of, OR'd together. A login role granted both driftless_app and
+    // driftless_admin therefore picks up the platform policy on job/job_step,
+    // and every tenant-scoped query silently gains cross-tenant visibility —
+    // no error, no failing query, nothing to notice. Role membership is the
+    // isolation boundary here, so the split is mandatory, not tidiness.
+    for (const [login, grant] of [
+      ["driftless_app_login", "driftless_app"],
+      ["driftless_worker_login", "driftless_admin"],
+    ] as const) {
+      await admin.query(`
+        DO $$ BEGIN
+          IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = '${login}') THEN
+            CREATE ROLE ${login} LOGIN INHERIT NOBYPASSRLS;
+          END IF;
+        END $$;
+      `);
+      await admin.query(`GRANT ${grant} TO ${login}`);
+      await admin.query(`GRANT CONNECT ON DATABASE driftless_test TO ${login}`);
+    }
   } finally {
     await admin.end();
   }

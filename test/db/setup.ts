@@ -18,6 +18,7 @@ export const ADMIN_URL =
   "postgresql://postgres@localhost:5433/driftless_test?host=/tmp/pgrun";
 
 export const APP_URL = ADMIN_URL.replace("postgres@", "driftless_app_login@");
+export const PLATFORM_URL = ADMIN_URL.replace("postgres@", "driftless_worker_login@");
 
 /**
  * Retained so test files read declaratively. Schema preparation already
@@ -42,8 +43,17 @@ export async function prepareDatabase(): Promise<void> {
   }
 }
 
+/** Tenant-scoped access only. No platform connection — most code needs none. */
 export function appDatabase(): Database {
   return new Database({ connectionString: APP_URL });
+}
+
+/** A worker: tenant access plus the platform connection used to dequeue. */
+export function workerDatabase(): Database {
+  return new Database({
+    connectionString: APP_URL,
+    platformConnectionString: PLATFORM_URL,
+  });
 }
 
 export async function adminClient(): Promise<pg.Client> {

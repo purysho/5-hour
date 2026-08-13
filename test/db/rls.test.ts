@@ -207,6 +207,65 @@ describe("RLS coverage", () => {
     }
   });
 
+  it("never grants one login role both driftless_app and driftless_admin", async () => {
+    /**
+     * Found by a failing test, not by review, and worth stating plainly.
+     *
+     * Postgres applies every policy attached to any role the current user is a
+     * member of, OR'd together. A login role holding both grants therefore
+     * picks up the platform policy on job/job_step, and every tenant-scoped
+     * query silently gains cross-tenant visibility — no error, no failing
+     * query, nothing to notice in a code review.
+     *
+     * Role membership is the isolation boundary. The application and the
+     * worker connect as separate login roles, and this test exists so that
+     * "simplify the roles" never happens without something going red.
+     */
+    const client = await adminClient();
+    try {
+      const { rows } = await client.query<{ member: string }>(`
+        SELECT m.rolname AS member
+        FROM pg_auth_members am_app
+        JOIN pg_roles app ON app.oid = am_app.roleid AND app.rolname = 'driftless_app'
+        JOIN pg_roles m ON m.oid = am_app.member
+        WHERE EXISTS (
+          SELECT 1
+          FROM pg_auth_members am_admin
+          JOIN pg_roles adm ON adm.oid = am_admin.roleid AND adm.rolname = 'driftless_admin'
+          WHERE am_admin.member = am_app.member
+        )
+      `);
+      expect(
+        rows.map((r) => r.member),
+        "these roles hold both grants and therefore see across tenants",
+      ).toEqual([]);
+    } finally {
+      await client.end();
+    }
+  });
+
+  it("gives the platform role no policy on tenant data tables", async () => {
+    // driftless_admin exists to move jobs through a shared queue and nothing
+    // more. If it acquires a policy on repositories, audit entries, or
+    // outbound writes, the "narrow, audited cross-tenant path" in ADR-0005 §6
+    // has quietly stopped being narrow.
+    const client = await adminClient();
+    try {
+      const { rows } = await client.query<{ tablename: string; polname: string }>(`
+        SELECT c.relname AS tablename, p.polname
+        FROM pg_policy p
+        JOIN pg_class c ON c.oid = p.polrelid
+        WHERE 'driftless_admin' = ANY (
+          SELECT rolname FROM pg_roles WHERE oid = ANY (p.polroles)
+        )
+      `);
+      const tables = [...new Set(rows.map((r) => r.tablename))].sort();
+      expect(tables).toEqual(["job", "job_step"]);
+    } finally {
+      await client.end();
+    }
+  });
+
   it("gives every policy a WITH CHECK clause, not only USING", async () => {
     const client = await adminClient();
     try {

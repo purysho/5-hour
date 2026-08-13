@@ -30,14 +30,35 @@ export interface TenantClient {
 }
 
 export interface PoolConfig {
+  /**
+   * Connects as a role granted `driftless_app` and NOTHING ELSE.
+   *
+   * This is load-bearing and not obvious. Postgres applies every policy
+   * attached to any role the current user is a member of, OR'd together. A
+   * login role holding both `driftless_app` and `driftless_admin` therefore
+   * picks up the platform policy on `job` and `job_step` — and every
+   * tenant-scoped query silently gains cross-tenant visibility, with no error
+   * and no failing query to notice.
+   *
+   * Role membership is the isolation boundary, so the two must never be
+   * combined on one login role. A test asserts this.
+   */
   connectionString: string;
-  /** Application role. Must not be a superuser and must not have BYPASSRLS. */
+  /**
+   * Connects as a role granted `driftless_admin` only. Used exclusively for
+   * taking jobs off the shared queue (ADR-0009). Omit it and
+   * `withPlatformContext` is unavailable, which is the right default for any
+   * process that is not a worker.
+   */
+  platformConnectionString?: string;
+  /** Neither role may be a superuser, and neither may have BYPASSRLS. */
   max?: number;
   statementTimeoutMs?: number;
 }
 
 export class Database {
   readonly #pool: pg.Pool;
+  readonly #platformPool: pg.Pool | null;
   readonly #statementTimeoutMs: number;
 
   constructor(config: PoolConfig) {
@@ -45,6 +66,15 @@ export class Database {
       connectionString: config.connectionString,
       max: config.max ?? 10,
     });
+    this.#platformPool = config.platformConnectionString
+      ? new pg.Pool({
+          connectionString: config.platformConnectionString,
+          // Deliberately small. The only platform operation is dequeue, and a
+          // large pool here would make an accidental cross-tenant query path
+          // cheap to run at volume.
+          max: 4,
+        })
+      : null;
     this.#statementTimeoutMs = config.statementTimeoutMs ?? 30_000;
   }
 
@@ -98,10 +128,19 @@ export class Database {
     if (!reason.trim()) {
       throw new Error("withPlatformContext requires a reason for the audit trail");
     }
-    const client = await this.#pool.connect();
+    if (!this.#platformPool) {
+      throw new Error(
+        "No platform connection configured. Cross-tenant access requires a " +
+          "separate login role granted driftless_admin only — see PoolConfig.",
+      );
+    }
+    // A separate pool, not SET ROLE on the app pool. The platform role's
+    // reach is decided by which credentials the process holds, so a bug in
+    // application code cannot escalate into it.
+    const client = await this.#platformPool.connect();
     try {
       await client.query("BEGIN");
-      await client.query("SET LOCAL ROLE driftless_admin");
+      await client.query(`SET LOCAL statement_timeout = ${this.#statementTimeoutMs}`);
       const result = await fn(client);
       await client.query("COMMIT");
       return result;
@@ -114,7 +153,7 @@ export class Database {
   }
 
   async close(): Promise<void> {
-    await this.#pool.end();
+    await Promise.all([this.#pool.end(), this.#platformPool?.end()]);
   }
 }
 

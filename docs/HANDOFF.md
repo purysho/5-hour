@@ -32,7 +32,7 @@ orders every control.
 
 ## Where things stand
 
-**Done and tested** (105 tests, ~94% line coverage, live Postgres required):
+**Done and tested** (142 tests, ~93% line coverage, live Postgres required):
 
 | Area | Where |
 |---|---|
@@ -42,10 +42,12 @@ orders every control.
 | Instruction/data boundary | `src/agent/untrusted.ts` |
 | Diff policy engine | `src/policy/` |
 | Adversarial corpus (CI gate) | `test/adversarial/corpus.test.ts` |
+| Durable job execution | `migrations/004_jobs.sql`, `src/workflow/`, `test/db/jobs.test.ts` |
+| Outbound write guard | `src/outbound/guard.ts`, `test/db/outbound-guard.test.ts` |
 
 **Not started:** change detection and corroboration, downstream repository
 discovery, the runner sandbox, migration generation, GitHub App integration,
-the durable workflow engine itself, the dashboard.
+the dashboard.
 
 ## Non-negotiables
 
@@ -72,13 +74,16 @@ make a change pass, stop.
 6. **The audit log is append-only.** Corrections are new compensating entries.
    Never an UPDATE.
 7. **Driftless opens pull requests. It never merges them.**
+8. **No login role holds both `driftless_app` and `driftless_admin`.** Postgres
+   ORs together every policy for every role you are a member of, so combining
+   them silently grants cross-tenant visibility with no error and nothing to
+   see in review. See ADR-0010 — this was found by a test, not by reading the
+   code.
 
 ## Next, in order
 
-1. **Durable workflow engine.** Decide between Temporal and a Postgres-backed
-   durable queue (River / pg-boss) and wire the claim/resolve protocol into it.
-   ADR-0004 deliberately left this open; given a solo team, the Postgres option
-   is probably right — write the ADR that closes it either way.
+1. ~~Durable workflow engine.~~ Done — ADR-0009 chose Postgres-backed durable
+   execution; `src/workflow/` implements leased dequeue and step memoisation.
 2. **GitHub App integration** against ADR-0002: KMS-held key, per-job token
    minting, credential helper outside the agent's reach. This is the piece
    most likely to be done wrong under time pressure.
@@ -126,6 +131,10 @@ su postgres -c "/usr/lib/postgresql/16/bin/createdb -h /tmp/pgrun -p 5433 driftl
 The default `DATABASE_URL` in `test/global-setup.ts` points at that socket.
 Schema reset happens once in global setup — never in per-file setup, or test
 files racing in separate workers will drop the schema underneath each other.
+
+Global setup creates two login roles, `driftless_app_login` and
+`driftless_worker_login`. Do not collapse them into one — see non-negotiable 8
+and ADR-0010.
 
 ## Open questions
 
