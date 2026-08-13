@@ -32,7 +32,7 @@ orders every control.
 
 ## Where things stand
 
-**Done and tested** (222 tests, live Postgres required):
+**Done and tested** (318 tests, live Postgres required):
 
 | Area | Where |
 |---|---|
@@ -49,11 +49,14 @@ orders every control.
 | Sandbox environment + egress | `src/sandbox/environment.ts`, `test/sandbox/` |
 | End-to-end migration workflow | `src/workflows/migrate-repository.ts`, `test/workflows/` |
 | Change corroboration + canary sizing | `src/detect/corroborate.ts`, `test/detect/` |
+| Semver precedence + breaking detection | `src/detect/semver.ts` |
+| npm registry + artifact collectors | `src/detect/npm.ts` |
 
-**Not started:** change detection and corroboration, downstream repository
-discovery, the runner sandbox, migration generation, the dashboard. The GitHub
-App credential layer exists (minting, scoping, redaction) but is not yet wired
-to a real App or to git operations.
+**Not started:** downstream repository discovery, the runner sandbox itself,
+migration generation, the dashboard. Detection has its gate, its version
+semantics, and its npm collectors, but nothing yet schedules a sweep. The
+credential layer is complete in logic but is not wired to a real GitHub App,
+a real KMS, or the unix-socket transport.
 
 ## Non-negotiables
 
@@ -108,10 +111,10 @@ make a change pass, stop.
    are done (ADR-0011). Still to do: a real KMS signer, the unix-socket
    transport between sandbox client and supervisor broker, and webhook
    ingestion.
-3. **Change detection** for one ecosystem (npm first — best metadata). The
-   corroboration gate and canary sizing exist in `src/detect/corroborate.ts`;
-   what remains is the collectors that produce `Corroboration` records from
-   the npm registry, published artifacts, and type-definition diffs.
+3. **Change detection.** Gate, semver, and npm registry/artifact collectors
+   are done. What remains: a type-definition diff collector (the third hard
+   source), and a scheduled sweep that turns "packages we watch" into
+   candidate `ChangeSignal`s via `nextStableAfter`.
 4. **Downstream discovery** via public dependency data.
 5. **Runner sandbox** per ADR-0006. The environment builder and egress
    allowlist exist and are tested; what remains is the isolation itself —
@@ -157,6 +160,9 @@ su postgres -c "/usr/lib/postgresql/16/bin/initdb -D /tmp/pgdata -U postgres --a
 su postgres -c "/usr/lib/postgresql/16/bin/pg_ctl -D /tmp/pgdata -l /tmp/pgdata/server.log -o '-p 5433 -k /tmp/pgrun' start"
 su postgres -c "/usr/lib/postgresql/16/bin/createdb -h /tmp/pgrun -p 5433 driftless_test"
 ```
+
+Or just run `scripts/dev-postgres.sh`, which does all of the above and is safe
+to re-run. Sandboxes tend to reap the server between sessions.
 
 The default `DATABASE_URL` in `test/global-setup.ts` points at that socket.
 Schema reset happens once in global setup — never in per-file setup, or test

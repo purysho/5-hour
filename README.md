@@ -181,7 +181,7 @@ src/
   outbound/guard.ts    kill switch, rate ceilings, idempotency claim (ADR-0004)
   policy/              diff parsing and policy enforcement (ADR-0003)
   sandbox/             runner environment and egress allowlist (ADR-0006)
-  detect/              change corroboration and canary sizing (§5.2)
+  detect/              corroboration, semver, npm collectors (§5.2)
   workflows/           the migration pipeline
   workflow/            durable job execution (ADR-0009)
 test/
