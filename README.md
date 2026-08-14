@@ -150,6 +150,11 @@ must talk to the outside world.
   the real queue and database with only the model and the forge injected
 - Detection: semver precedence, npm range satisfaction, registry and artifact
   collectors, and the corroboration gate that weighs them
+- API surface extraction with the TypeScript compiler, over a host that reads
+  nothing off disk — so a published `.d.ts` cannot become a file reader — and a
+  tarball reader that never writes to disk at all, which makes symlink, path
+  traversal, and decompression-bomb attacks inapplicable rather than defended
+  against
 - Impact classification — stranded versus exposed versus current — and fan-out
   prioritisation
 - The detection scheduler: the claim is a database statement, so two workers
@@ -196,7 +201,7 @@ src/
   outbound/guard.ts    kill switch, rate ceilings, idempotency claim (ADR-0004)
   policy/              diff parsing and policy enforcement (ADR-0003)
   sandbox/             runner environment and egress allowlist (ADR-0006)
-  detect/              corroboration, semver, npm collectors (§5.2)
+  detect/              corroboration, semver, npm, surface extraction (§5.2)
   workflows/           the migration pipeline
   workflow/            durable job execution (ADR-0009)
   schedule/            when detection runs (migration 007)

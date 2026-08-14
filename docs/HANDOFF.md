@@ -143,6 +143,15 @@ make a change pass, stop.
    says `not-run`, and the pull request body says so too. A migration
    presented as verified when it is not destroys the only thing that makes
    these pull requests worth opening.
+17. **Nothing published is fetched or parsed with a filesystem behind it.**
+   The compiler host in `dts-surface.ts` is backed by a map; the tarball
+   reader never writes. Both are attacker-authored input processed inside the
+   control plane, and the safety comes from the absence of the capability
+   rather than from checks around it. Adding `fs` to either file is a design
+   change, not a refactor.
+18. **A tarball URL is checked against an allowlist before it is fetched.**
+   `dist.tarball` is chosen by the registry, so an unchecked fetch is
+   server-side request forgery with our network position behind it.
 
 ## Next, in order
 
@@ -156,14 +165,22 @@ make a change pass, stop.
    transport between sandbox client and supervisor broker. Webhook ingestion
    is done — signature verification, replay claims, and the apply path that
    makes revocation take effect.
-3. **Change detection.** Gate, semver, ranges, npm collectors, and API surface
-   diffing are done. What remains: extracting an `ApiSurface` from real
-   published `.d.ts` files (use the TypeScript compiler API — a regex parser
-   will silently mis-report on conditional types, re-exports, and overloads),
-   The sweep workflow and the scheduler are done — `watched_package` plus
+3. **Change detection.** Done end to end. Gate, semver, ranges, and npm
+   collectors; API surface diffing; surface *extraction* via the TypeScript
+   compiler (`src/detect/dts-surface.ts`) over a host backed by a map rather
+   than a filesystem; the tarball reader (`src/detect/tarball.ts`), which
+   decodes entirely in memory; and the scheduler — `watched_package` plus
    `claim_due_sweeps` (migration 007) put the claim in the database, so every
-   worker can run a scheduler without duplicating sweeps. Nothing is swept
-   until a row exists in `watched_package`.
+   worker can run one without duplicating sweeps.
+
+   Two properties to preserve. Neither the compiler host nor the tarball
+   reader touches `fs`: the moment one of them writes a file or reads one,
+   symlink attacks, path traversal, and `/// <reference path>` file reads stop
+   being *inapplicable* and start needing real defences. And nothing is swept
+   until a row exists in `watched_package` — an empty table is a silent
+   no-op, which is the correct default but is worth knowing when detection
+   appears to be doing nothing.
+
 4. **Downstream discovery.** Impact classification and prioritisation are done
    in `src/discover/affected.ts`. What remains is the crawler that produces
    `RepositoryCandidate`s from public dependency data — GitHub's dependency

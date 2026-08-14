@@ -26,6 +26,7 @@ import { Queue } from "../workflow/queue.ts";
 import { installSignalHandlers, startWorker } from "./worker.ts";
 import { detectChangesWorkflow } from "../workflows/detect-changes.ts";
 import { NpmCollector } from "../detect/npm.ts";
+import { NpmSurfaceSource } from "../detect/npm-surface-source.ts";
 import { PostgresSweepStore, SweepScheduler } from "../schedule/sweep-scheduler.ts";
 
 const config = loadConfig();
@@ -58,10 +59,25 @@ queue.register({
         return { status: response.status, body: await response.text() };
       },
     }),
-    // No production extractor yet. Returning null costs a corroboration source
-    // rather than inventing one — the gate then requires registry and artifact
-    // to agree, at moderate confidence instead of high.
-    surfaces: { surfaceFor: async () => null },
+    // The third corroboration source, and the only one that speaks to whether
+    // consumers will actually break. It fails to null on every error, which
+    // costs a corroboration rather than failing the sweep — one publisher's
+    // malformed tarball must not become an outage of ours.
+    surfaces: new NpmSurfaceSource(
+      new NpmCollector({
+        async get(url, headers) {
+          const response = await fetch(url, { headers });
+          return { status: response.status, body: await response.text() };
+        },
+      }),
+      {
+        async get(url, headers) {
+          const response = await fetch(url, { headers });
+          return { status: response.status, body: Buffer.from(await response.arrayBuffer()) };
+        },
+      },
+      { log },
+    ),
     recorder: {
       // `impacted_symbols` is not optional detail. The migration blast radius
       // is derived from it before any inference runs (ADR-0013), so dropping
