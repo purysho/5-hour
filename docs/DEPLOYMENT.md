@@ -17,6 +17,9 @@ happen. Written for a solo operator with no prior deployment.
 | Webhook URL (later) | `https://<your-origin>/webhooks/github` |
 | Webhook secret | `openssl rand -hex 32` |
 
+Then `pnpm preflight` — it will tell you if the key and the App ID disagree,
+which is the failure that is otherwise invisible until the first pull request.
+
 **Repository permissions — these two and nothing else:**
 
 - Contents: **Read and write**
@@ -186,6 +189,28 @@ rather than on the first request under load.
 ---
 
 ## 5. Verify
+
+Before anything else:
+
+```bash
+pnpm preflight
+```
+
+It is read-only — it mints nothing and opens nothing — and it checks the
+things configuration cannot:
+
+- **the private key actually belongs to this App.** An App ID and a `.pem`
+  from different Apps produce a JWT GitHub rejects, and without this the first
+  place you find out is inside a job, behind a retry
+- **the permission manifest is still `contents:write` + `pull_requests:write`
+  and holds none of the forbidden permissions.** Widening it is a settings
+  change on a web page — ten seconds, no diff, no review — so this is the only
+  automated check that a box has not been ticked
+- **the two database roles are separate**, neither is a superuser, and neither
+  has `BYPASSRLS`
+- **the migrations are applied**
+
+Then the endpoints:
 
 ```bash
 curl https://<origin>/                # 200, the homepage
