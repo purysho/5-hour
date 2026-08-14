@@ -74,6 +74,20 @@ governs the runner sandbox in ADR-0006.
   be decided by code order rather than by anyone's intent.
 - **The key id is the path, never the contents.** It reaches logs and the
   audit chain.
+- **On Windows, the permission check says it cannot check.** Node synthesises
+  `stat().mode` from the read-only attribute there, so `mode & 0o077` refuses
+  every key on the platform while measuring nothing about the ACL that
+  actually governs access. Reading the real ACL means a subprocess in a
+  security-critical constructor, parsing localised `icacls` output. So the
+  guard states plainly that it cannot verify, prints the `icacls` command that
+  restricts the file, and requires
+  `DRIFTLESS_ACCEPT_UNVERIFIED_KEY_PERMISSIONS=windows-acl-checked-by-hand`.
+
+  A check that cannot run should say so rather than pass quietly — and it
+  should not pretend to have run, which is what a platform-blind `chmod`
+  message does. The production acknowledgement is unaffected: both are
+  required on Windows in production, because being unable to verify
+  permissions is not a reason to stop asking about what ADR-0012 bounds.
 
 ## Consequences
 

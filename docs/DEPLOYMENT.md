@@ -50,6 +50,27 @@ mv ~/Downloads/<app>.<date>.private-key.pem ~/.driftless/github-app.pem
 chmod 600 ~/.driftless/github-app.pem
 ```
 
+On Windows, in PowerShell — note that Windows PowerShell 5.1 has no `&&`, so
+these are separate lines:
+
+```powershell
+New-Item -ItemType Directory -Force -Path "$HOME\.driftless"
+Move-Item "$HOME\Downloads\<app>.<date>.private-key.pem" "$HOME\.driftless\github-app.pem"
+icacls "$HOME\.driftless\github-app.pem" /inheritance:r /grant:r "$($env:USERNAME):(R)"
+```
+
+`/inheritance:r` drops every inherited permission and `/grant:r` replaces the
+list with your account alone — the real equivalent of `chmod 600`. Node cannot
+read that ACL, so `FileSigner` will ask you to confirm you ran it:
+
+```powershell
+$env:DRIFTLESS_ACCEPT_UNVERIFIED_KEY_PERMISSIONS = "windows-acl-checked-by-hand"
+```
+
+Running under WSL avoids the acknowledgement entirely, and is the easier path
+overall — the test suite needs a live Postgres and `scripts/dev-postgres.sh` is
+a shell script.
+
 - **Never commit it.** `.gitignore` blocks `*.pem`; do not test that.
 - **Never put it in an environment variable.** `loadConfig` refuses to start
   if `GITHUB_PRIVATE_KEY` is set, because a key that has been in an

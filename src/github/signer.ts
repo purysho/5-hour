@@ -117,11 +117,27 @@ export class FileSigner implements Signer {
   static readonly ACK_VAR = "DRIFTLESS_ACCEPT_IN_PROCESS_SIGNING_KEY";
   static readonly ACK_VALUE = "yes-i-know-this-is-not-a-kms";
 
+  /**
+   * Windows has no POSIX mode. Node fabricates `stat().mode` there from the
+   * read-only attribute, so the permission check below is not measuring
+   * anything — see the comment at the check itself. This variable is the
+   * operator asserting they have restricted the file by the means their
+   * platform actually has.
+   */
+  static readonly WINDOWS_ACK_VAR = "DRIFTLESS_ACCEPT_UNVERIFIED_KEY_PERMISSIONS";
+  static readonly WINDOWS_ACK_VALUE = "windows-acl-checked-by-hand";
+
   constructor(
     path: string,
-    options: { keyId?: string; env?: NodeJS.ProcessEnv } = {},
+    options: {
+      keyId?: string;
+      env?: NodeJS.ProcessEnv;
+      /** Injected so both branches are testable from one machine. */
+      platform?: NodeJS.Platform;
+    } = {},
   ) {
     const env = options.env ?? process.env;
+    const platform = options.platform ?? process.platform;
 
     if (env["NODE_ENV"] === "production" && env[FileSigner.ACK_VAR] !== FileSigner.ACK_VALUE) {
       throw new Error(
@@ -139,9 +155,31 @@ export class FileSigner implements Signer {
       throw new Error(`Signing key file not found or unreadable: ${path}`);
     }
 
-    // 0o077 covers group and other. A private key readable by anyone else on
-    // the host is not private.
-    if ((mode & 0o077) !== 0) {
+    if (platform === "win32") {
+      // Windows has no POSIX mode. Node synthesises one from the read-only
+      // attribute — every file reads as 0o666 or 0o444 — so `mode & 0o077`
+      // would refuse every key on the platform while measuring nothing about
+      // the ACL that actually governs access.
+      //
+      // Reading the real ACL means shelling out to `icacls` and parsing output
+      // that is localised, or writing SDDL to a temporary file. Both are a
+      // subprocess in a security-critical constructor, for a check whose
+      // failure mode we can instead make explicit. So the honest position is:
+      // say we cannot verify it, and require the operator to assert they have.
+      if (env[FileSigner.WINDOWS_ACK_VAR] !== FileSigner.WINDOWS_ACK_VALUE) {
+        throw new Error(
+          `Cannot verify the permissions of ${path} on Windows: Node reports a ` +
+            `POSIX mode the filesystem does not have, so the check that runs ` +
+            `elsewhere would be measuring nothing.\n` +
+            `Restrict the file to your account, then assert that you have:\n\n` +
+            `  icacls "${path}" /inheritance:r /grant:r "$($env:USERNAME):(R)"\n` +
+            `  $env:${FileSigner.WINDOWS_ACK_VAR} = "${FileSigner.WINDOWS_ACK_VALUE}"\n\n` +
+            `Running under WSL instead avoids this: the check is real there.`,
+        );
+      }
+    } else if ((mode & 0o077) !== 0) {
+      // 0o077 covers group and other. A private key readable by anyone else on
+      // the host is not private.
       throw new Error(
         `Signing key file ${path} is group- or world-readable (mode ` +
           `${(mode & 0o777).toString(8)}). Run: chmod 600 ${path}`,

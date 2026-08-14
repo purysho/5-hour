@@ -74,9 +74,12 @@ if (config) {
     } else {
       signer = new FileSigner(config.github.signing.path);
       record(
-        "pass",
+        process.platform === "win32" ? "warn" : "pass",
         "signing key",
-        `file, mode 600 or tighter (${config.github.signing.path}) — interim, see ADR-0012`,
+        process.platform === "win32"
+          ? `file (${config.github.signing.path}) — permissions NOT verified; Windows ` +
+            "has no POSIX mode and the ACL was asserted by hand (ADR-0012)"
+          : `file, mode 600 or tighter (${config.github.signing.path}) — interim, see ADR-0012`,
       );
     }
   } catch (error) {

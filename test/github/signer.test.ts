@@ -109,6 +109,71 @@ describe("FileSigner", () => {
     );
   });
 
+  it("does not apply the POSIX check on Windows, where it measures nothing", () => {
+    // Node synthesises `stat().mode` on Windows from the read-only attribute,
+    // so every file reads as 0o666 whatever its ACL says. Applying the check
+    // there refuses every key on the platform and tells the operator to run
+    // `chmod`, which does not exist. Found by an operator on PowerShell.
+    const loose = join(dir, "windows.pem");
+    writeFileSync(loose, PEM, { mode: 0o644 });
+
+    expect(
+      () =>
+        new FileSigner(loose, {
+          platform: "win32",
+          env: {
+            NODE_ENV: "development",
+            [FileSigner.WINDOWS_ACK_VAR]: FileSigner.WINDOWS_ACK_VALUE,
+          },
+        }),
+    ).not.toThrow();
+  });
+
+  it("refuses on Windows without the acknowledgement, and says how to restrict the file", () => {
+    // The honest position: the ACL cannot be verified cheaply, so say so and
+    // require the operator to assert they have restricted it.
+    try {
+      new FileSigner(keyPath, { platform: "win32", env: { NODE_ENV: "development" } });
+      expect.unreachable();
+    } catch (error) {
+      const message = (error as Error).message;
+      expect(message).toContain("Cannot verify the permissions");
+      expect(message).toContain("icacls");
+      expect(message).toContain(FileSigner.WINDOWS_ACK_VAR);
+      expect(message).not.toContain("chmod");
+    }
+  });
+
+  it("does not let the Windows acknowledgement excuse a loose file elsewhere", () => {
+    const loose = join(dir, "posix.pem");
+    writeFileSync(loose, PEM, { mode: 0o644 });
+    expect(
+      () =>
+        new FileSigner(loose, {
+          platform: "linux",
+          env: {
+            NODE_ENV: "development",
+            [FileSigner.WINDOWS_ACK_VAR]: FileSigner.WINDOWS_ACK_VALUE,
+          },
+        }),
+    ).toThrow(/world-readable|chmod 600/);
+  });
+
+  it("still requires the production acknowledgement on Windows", () => {
+    // Two independent guards. Being unable to verify permissions is not a
+    // reason to stop asking about the thing ADR-0012 actually bounds.
+    expect(
+      () =>
+        new FileSigner(keyPath, {
+          platform: "win32",
+          env: {
+            NODE_ENV: "production",
+            [FileSigner.WINDOWS_ACK_VAR]: FileSigner.WINDOWS_ACK_VALUE,
+          },
+        }),
+    ).toThrow(/Refusing to hold the GitHub App private key/);
+  });
+
   it("refuses a missing file with a useful message", () => {
     expect(
       () => new FileSigner(join(dir, "nope.pem"), { env: { NODE_ENV: "development" } }),
