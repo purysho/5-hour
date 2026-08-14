@@ -26,6 +26,7 @@ import { Queue } from "../workflow/queue.ts";
 import { installSignalHandlers, startWorker } from "./worker.ts";
 import { detectChangesWorkflow } from "../workflows/detect-changes.ts";
 import { NpmCollector } from "../detect/npm.ts";
+import { PostgresSweepStore, SweepScheduler } from "../schedule/sweep-scheduler.ts";
 
 const config = loadConfig();
 
@@ -62,16 +63,26 @@ queue.register({
     // to agree, at moderate confidence instead of high.
     surfaces: { surfaceFor: async () => null },
     recorder: {
+      // `impacted_symbols` is not optional detail. The migration blast radius
+      // is derived from it before any inference runs (ADR-0013), so dropping
+      // it here would make every downstream migration refuse itself for a
+      // reason that reads like "nothing references this package".
+      //
+      // `approved_at` is preserved on conflict rather than overwritten: a
+      // re-sweep must not silently revoke a human's approval, and must not
+      // grant one either.
       record: async (input) =>
         db.withTenant(input.providerId, async (client) => {
           const { rows } = await client.query<{ id: string }>(
             `INSERT INTO upstream_change
                (provider_id, change_key, ecosystem, package_name,
-                from_version, to_version, summary, corroborations)
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+                from_version, to_version, summary, corroborations,
+                impacted_symbols, approved_at)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
              ON CONFLICT (provider_id, change_key) DO UPDATE
                SET corroborations = EXCLUDED.corroborations,
-                   summary = EXCLUDED.summary
+                   summary = EXCLUDED.summary,
+                   impacted_symbols = EXCLUDED.impacted_symbols
              RETURNING id`,
             [
               input.providerId,
@@ -82,6 +93,8 @@ queue.register({
               input.toVersion,
               input.summary,
               JSON.stringify(input.corroborations),
+              input.impactedSymbols,
+              input.approvedAt,
             ],
           );
           return rows[0]!.id;
@@ -121,8 +134,22 @@ const worker = startWorker(queue, {
   log,
 });
 
+// ── Scheduler ───────────────────────────────────────────────────────────────
+//
+// Enqueues `detect-changes` for packages whose sweep is due. Safe to run in
+// every worker: the claim happens in the database, so N schedulers produce one
+// sweep per package per interval rather than N (migration 007).
+const scheduler = new SweepScheduler({
+  store: new PostgresSweepStore(db),
+  queue,
+  log: (event, detail) => log(event, detail),
+}).start(config.worker.schedulerIntervalMs);
+
 installSignalHandlers(worker, log);
 
 await worker.finished;
+// After the worker, so a tick in flight when SIGTERM arrived finishes its
+// enqueues rather than losing them.
+await scheduler.stop();
 await db.close();
 log("worker exited");

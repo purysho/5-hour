@@ -137,6 +137,8 @@ describe("refusing to start", () => {
       ["WORKER_CONCURRENCY", "1000"],
       ["WORKER_POLL_INTERVAL_MS", "10"],
       ["SHUTDOWN_GRACE_MS", "1"],
+      ["SCHEDULER_INTERVAL_MS", "100"],
+      ["SCHEDULER_INTERVAL_MS", "99999999"],
     ] as const) {
       expect(() => loadConfig({ ...VALID, [key]: value }), `${key}=${value}`).toThrow(
         ConfigError,
@@ -175,6 +177,7 @@ describe("defaults and derivation", () => {
       concurrency: 4,
       pollIntervalMs: 1000,
       shutdownGraceMs: 30_000,
+      schedulerIntervalMs: 60_000,
     });
     expect(config.http.port).toBe(8080);
   });

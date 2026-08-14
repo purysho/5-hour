@@ -95,6 +95,12 @@ export interface Config {
     readonly concurrency: number;
     readonly pollIntervalMs: number;
     readonly shutdownGraceMs: number;
+    /**
+     * How often the scheduler looks for packages due a sweep. Not the sweep
+     * interval itself — that is per-package, in `watched_package`. This only
+     * bounds how late a due sweep can be.
+     */
+    readonly schedulerIntervalMs: number;
   };
 }
 
@@ -209,6 +215,7 @@ export function loadConfig(env: Env = process.env): Config {
   const concurrency = number_("WORKER_CONCURRENCY", 4, 1, 64);
   const pollIntervalMs = number_("WORKER_POLL_INTERVAL_MS", 1000, 100, 60_000);
   const shutdownGraceMs = number_("SHUTDOWN_GRACE_MS", 30_000, 1000, 300_000);
+  const schedulerIntervalMs = number_("SCHEDULER_INTERVAL_MS", 60_000, 5_000, 3_600_000);
 
   if (problems.length > 0) {
     throw new ConfigError(
@@ -232,7 +239,7 @@ export function loadConfig(env: Env = process.env): Config {
       port,
       publicOrigin: publicOrigin.replace(/\/+$/, ""),
     },
-    worker: { concurrency, pollIntervalMs, shutdownGraceMs },
+    worker: { concurrency, pollIntervalMs, shutdownGraceMs, schedulerIntervalMs },
   };
 }
 

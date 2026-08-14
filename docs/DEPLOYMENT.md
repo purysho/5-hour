@@ -110,8 +110,8 @@ Run migrations once before either starts: `pnpm db:migrate`.
 ### Two database roles
 
 The schema defines `driftless_app` (tenant-scoped, RLS applies) and
-`driftless_worker` (platform, for dequeue and the two minimal-disclosure
-lookups). ADR-0010 is emphatic that **no login role may hold both** — Postgres
+`driftless_admin` (platform, for dequeue and the minimal-disclosure lookups).
+ADR-0010 is emphatic that **no login role may hold both** — Postgres
 ORs together the policies of every role you belong to, so combining them
 silently grants cross-tenant visibility with no error and nothing to see in
 review.
@@ -120,7 +120,7 @@ review.
 CREATE ROLE driftless_app_login   LOGIN PASSWORD '...' INHERIT NOBYPASSRLS;
 CREATE ROLE driftless_worker_login LOGIN PASSWORD '...' INHERIT NOBYPASSRLS;
 GRANT driftless_app    TO driftless_app_login;
-GRANT driftless_worker TO driftless_worker_login;
+GRANT driftless_admin  TO driftless_worker_login;
 ```
 
 `DATABASE_URL` uses the first; `PLATFORM_DATABASE_URL` uses the second.
@@ -163,6 +163,20 @@ ANTHROPIC_API_KEY=sk-ant-...
 PORT=8080
 WORKER_CONCURRENCY=4
 SHUTDOWN_GRACE_MS=30000
+SCHEDULER_INTERVAL_MS=60000
+```
+
+The scheduler runs inside every worker and is safe to duplicate: the claim
+happens in the database, so N workers produce one sweep per package per
+interval rather than N. `SCHEDULER_INTERVAL_MS` is how often it *looks* for due
+packages, not how often a package is swept — that is per-package, in
+`watched_package.sweep_interval_seconds`.
+
+Nothing is swept until a package is watched:
+
+```sql
+INSERT INTO watched_package (provider_id, ecosystem, package_name, baseline_version)
+VALUES ('<provider-uuid>', 'npm', 'acme-sdk', '1.4.2');
 ```
 
 Configuration is validated completely at startup and **every** problem is

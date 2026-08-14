@@ -152,6 +152,8 @@ must talk to the outside world.
   collectors, and the corroboration gate that weighs them
 - Impact classification — stranded versus exposed versus current — and fan-out
   prioritisation
+- The detection scheduler: the claim is a database statement, so two workers
+  produce one sweep per package per interval rather than two
 
 **Not built yet**
 
@@ -197,6 +199,7 @@ src/
   detect/              corroboration, semver, npm collectors (§5.2)
   workflows/           the migration pipeline
   workflow/            durable job execution (ADR-0009)
+  schedule/            when detection runs (migration 007)
 test/
   adversarial/         injection corpus — blocking CI gate
 ```

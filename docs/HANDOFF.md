@@ -160,8 +160,10 @@ make a change pass, stop.
    diffing are done. What remains: extracting an `ApiSurface` from real
    published `.d.ts` files (use the TypeScript compiler API — a regex parser
    will silently mis-report on conditional types, re-exports, and overloads),
-   and a scheduler that enqueues `detect-changes` jobs for watched packages
-   on an interval. The sweep workflow itself is done.
+   The sweep workflow and the scheduler are done — `watched_package` plus
+   `claim_due_sweeps` (migration 007) put the claim in the database, so every
+   worker can run a scheduler without duplicating sweeps. Nothing is swept
+   until a row exists in `watched_package`.
 4. **Downstream discovery.** Impact classification and prioritisation are done
    in `src/discover/affected.ts`. What remains is the crawler that produces
    `RepositoryCandidate`s from public dependency data — GitHub's dependency
