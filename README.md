@@ -156,7 +156,8 @@ must talk to the outside world.
   traversal, and decompression-bomb attacks inapplicable rather than defended
   against
 - Impact classification — stranded versus exposed versus current — and fan-out
-  prioritisation
+  prioritisation, fed by manifest and lockfile reading that returns null on any
+  ambiguity rather than guessing a resolved version
 - The detection scheduler: the claim is a database statement, so two workers
   produce one sweep per package per interval rather than two
 

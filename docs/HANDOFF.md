@@ -182,9 +182,18 @@ make a change pass, stop.
    appears to be doing nothing.
 
 4. **Downstream discovery.** Impact classification and prioritisation are done
-   in `src/discover/affected.ts`. What remains is the crawler that produces
+   in `src/discover/affected.ts`, and manifest and lockfile reading is done in
+   `src/discover/manifest.ts`. What remains is the crawler that produces
    `RepositoryCandidate`s from public dependency data — GitHub's dependency
    graph, registry dependents, or code search.
+
+   The lockfile reader is a targeted extractor rather than a parser, and the
+   reason it is allowed to be is worth keeping straight: it contributes only
+   `lockedVersion`, which sharpens a verdict `assessRepository` already reaches
+   from the declared range. It returns null on any ambiguity. That trade does
+   *not* transfer to `dts-surface.ts`, where an approximation would decide
+   whether a change is breaking.
+
 5. **Runner sandbox** per ADR-0006. The environment builder and egress
    allowlist exist and are tested; what remains is the isolation itself —
    gVisor or Firecracker, single-use instances, the proxy that enforces the
