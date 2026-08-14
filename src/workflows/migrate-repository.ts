@@ -7,6 +7,14 @@ import {
 } from "../outbound/guard.ts";
 import { evaluateDiff, type PolicyContext, type PolicyDecision } from "../policy/diff-policy.ts";
 import { PermanentFailure, type WorkflowContext } from "../workflow/types.ts";
+import {
+  composePullRequest,
+  type ChangeSummary,
+  type TestOutcome,
+} from "../forge/pull-request.ts";
+import { parseUnifiedDiff } from "../policy/diff.ts";
+import { issueOptOutToken, recordOptOutToken } from "../outbound/suppression.ts";
+import type { Impact } from "../discover/affected.ts";
 import type { UntrustedContent } from "../agent/untrusted.ts";
 
 /**
@@ -64,7 +72,24 @@ export interface MigrationAgent {
     /** Repository content, already wrapped. Never interpolated (ADR-0003). */
     sources: readonly { path: string; content: UntrustedContent }[];
     changeSummary: string;
-  }): Promise<{ diff: string; blastRadius: readonly string[]; summary: string }>;
+  }): Promise<{
+    diff: string;
+    blastRadius: readonly string[];
+    summary: string;
+    /**
+     * How the migration was validated. The agent runs the repository's own
+     * suite inside the sandbox, so it is the only component that knows.
+     *
+     * Reported honestly, including failure — a migration presented as verified
+     * when it is not destroys the only thing that makes these pull requests
+     * worth opening.
+     */
+    verification: {
+      tests: TestOutcome;
+      command: string | null;
+      durationSeconds?: number;
+    };
+  }>;
 }
 
 export interface ForgeClient {
@@ -95,7 +120,16 @@ export interface MigrationDeps {
   readonly loadContext: (
     client: TenantClient,
     input: MigrationInput,
-  ) => Promise<{ repository: RepositoryContext; changeSummary: string }>;
+  ) => Promise<{
+    repository: RepositoryContext;
+    changeSummary: string;
+    /** Structured change facts for the pull request body. */
+    change: ChangeSummary;
+    changeKey: string;
+    impact: Impact;
+    /** Release link. Allowlisted by host before it reaches the body. */
+    upstreamUrl?: string;
+  }>;
   /**
    * Reads repository content. Called inside the generation step and never
    * across a step boundary — see the note at the top of this file.
@@ -109,6 +143,8 @@ export interface MigrationDeps {
     providerId: string,
     fn: (client: TenantClient) => Promise<T>,
   ) => Promise<T>;
+  /** Builds the public opt-out URL from a minted token. From config. */
+  readonly optOutUrl: (token: string) => string;
 }
 
 export type MigrationOutcome =
@@ -233,7 +269,32 @@ export function migrateRepositoryWorkflow(deps: MigrationDeps) {
       return { status: "escalated", findings: decision.findings };
     }
 
-    // ── 5. Open the pull request ────────────────────────────────────────────
+    // ── 5. Mint the opt-out token ───────────────────────────────────────────
+    //
+    // BEFORE the pull request, not after. The body contains the link, so a
+    // token recorded afterwards would leave a window in which we published a
+    // link that does not work — and the maintainer most likely to click it is
+    // the one who clicks immediately.
+    //
+    // The token IS a step result, which looks like a violation of the rule
+    // that credentials must not cross a step boundary. It is not: this value
+    // is about to be printed in a public pull request body, its only
+    // capability is to stop us contacting that repository, and it must survive
+    // replay so the link in an already-opened pull request keeps working. A
+    // fresh token per attempt would silently break the link in the body.
+    const optOutToken = await ctx.step("mint-opt-out-token", async () => {
+      const issued = issueOptOutToken();
+      await deps.withTenant(ctx.providerId, (client) =>
+        recordOptOutToken(client, ctx.providerId, issued.hash, {
+          forge: "github",
+          owner: loaded.repository.forgeOwner,
+          name: loaded.repository.forgeName,
+        }),
+      );
+      return issued.token;
+    });
+
+    // ── 6. Open the pull request ────────────────────────────────────────────
     //
     // The token is minted INSIDE this step and never leaves it. See the note
     // at the top of this file: a credential must never be a step result.
@@ -248,14 +309,34 @@ export function migrateRepositoryWorkflow(deps: MigrationDeps) {
         deps.audit,
       );
 
+      // Composed from structured facts only. There is no parameter a
+      // changelog could travel through, so upstream prose cannot be laundered
+      // through a body a maintainer trusts (see src/forge/pull-request.ts).
+      const composed = composePullRequest({
+        change: loaded.change,
+        impact: loaded.impact,
+        verification: {
+          tests: generated.verification.tests,
+          command: generated.verification.command,
+          ...(generated.verification.durationSeconds !== undefined && {
+            durationSeconds: generated.verification.durationSeconds,
+          }),
+          policyVerdict: decision.verdict,
+        },
+        filesChanged: parseUnifiedDiff(generated.diff).files.length,
+        changeKey: loaded.changeKey,
+        optOutUrl: deps.optOutUrl(optOutToken),
+        ...(loaded.upstreamUrl !== undefined && { upstreamUrl: loaded.upstreamUrl }),
+      });
+
       const result = await deps.forge.openPullRequest({
         token,
         owner: loaded.repository.forgeOwner,
         name: loaded.repository.forgeName,
         baseSha: input.baseSha,
         branch: `driftless/${input.changeId.slice(0, 8)}`,
-        title: generated.summary,
-        body: buildPullRequestBody(generated.summary, loaded.changeSummary),
+        title: composed.title,
+        body: composed.body,
         diff: generated.diff,
       });
 
@@ -263,7 +344,7 @@ export function migrateRepositoryWorkflow(deps: MigrationDeps) {
       return { number: result.number, url: result.url };
     });
 
-    // ── 6. Record the result ────────────────────────────────────────────────
+    // ── 7. Record the result ────────────────────────────────────────────────
     await ctx.step("record-result", async () =>
       deps.withTenant(ctx.providerId, (client) =>
         recordOutboundResult(client, writeId, {
@@ -287,16 +368,3 @@ export function migrateRepositoryWorkflow(deps: MigrationDeps) {
  * untrusted text would carry an injection straight to a human reviewer, which
  * is the one place in the pipeline where persuasion still works.
  */
-function buildPullRequestBody(summary: string, changeSummary: string): string {
-  return [
-    summary,
-    "",
-    "### Why",
-    changeSummary,
-    "",
-    "---",
-    "Opened by Driftless. This migration was generated automatically and",
-    "validated against your test suite. Driftless cannot merge this pull",
-    "request — review is yours.",
-  ].join("\n");
-}

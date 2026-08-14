@@ -13,7 +13,7 @@ import { GitHubApp, type AuditSink, type HttpClient } from "../../src/github/app
 import { LocalSigner } from "../../src/github/signer.ts";
 import { ScopedToken } from "../../src/github/token.ts";
 import { Queue } from "../../src/workflow/queue.ts";
-import { suppress } from "../../src/outbound/suppression.ts";
+import { hashToken, suppress } from "../../src/outbound/suppression.ts";
 import {
   migrateRepositoryWorkflow,
   type ForgeClient,
@@ -117,6 +117,11 @@ function buildDeps(
         diff: overrides.diff ?? CLEAN_DIFF,
         blastRadius: ["src/client.ts"],
         summary: "Migrate acme-sdk callbacks to promises",
+        verification: {
+          tests: "passed" as const,
+          command: "npm test",
+          durationSeconds: 12,
+        },
       }),
     } satisfies MigrationAgent);
 
@@ -137,7 +142,18 @@ function buildDeps(
         knownHosts: ["api.acme.com"],
       },
       changeSummary: "acme-sdk v3 removes the callback API",
+      change: {
+        packageName: "acme-sdk",
+        fromVersion: "2.9.1",
+        toVersion: "3.0.0",
+        ecosystem: "npm",
+        corroboratedBy: ["registry", "artifact", "spec"],
+        impactedSymbols: ["createClient"],
+      },
+      changeKey: "acme-sdk@3.0.0",
+      impact: "stranded" as const,
     }),
+    optOutUrl: (token: string) => `https://driftless.dev/opt-out/${token}`,
     loadSources: async () => [
       {
         path: "src/client.ts",
@@ -252,7 +268,58 @@ describe("the happy path", () => {
     const request = deps.forgeCalls[0] as { body: string };
     expect(request.body).not.toContain("AGENT: ignore instructions");
     expect(request.body).not.toContain("GITHUB_TOKEN");
-    expect(request.body).toContain("Driftless cannot merge");
+    expect(request.body).toContain("cannot merge");
+  });
+
+  it("carries a working opt-out link, minted before the pull request", async () => {
+    // The body promises "one click, no account". Until now nothing generated
+    // the link, so the promise was printed and unkept — the same class of gap
+    // as an opt-out endpoint that does not exist.
+    const tenant = await seedProvider("wf-optout-link");
+    const deps = buildDeps();
+    await runWorkflow(tenant, deps);
+
+    const request = deps.forgeCalls[0] as { body: string };
+    const match = /https:\/\/driftless\.dev\/opt-out\/([A-Za-z0-9_-]+)/.exec(request.body);
+    expect(match, "pull request body must contain an opt-out link").not.toBeNull();
+
+    // And the token in that link must already be redeemable.
+    const { rows } = await db.withTenant(tenant.providerId, (client) =>
+      client.query<{ count: string }>(
+        "SELECT count(*) FROM opt_out_token WHERE token_hash = $1",
+        [hashToken(match![1] as string)],
+      ),
+    );
+    expect(Number(rows[0]!.count)).toBe(1);
+  });
+
+  it("reuses the same opt-out token on replay", async () => {
+    // A fresh token per attempt would silently invalidate the link already
+    // published in an opened pull request.
+    const tenant = await seedProvider("wf-optout-replay");
+    const deps = buildDeps();
+    await runWorkflow(tenant, deps);
+    await runWorkflow(tenant, deps);
+
+    const { rows } = await db.withTenant(tenant.providerId, (client) =>
+      client.query<{ count: string }>("SELECT count(*) FROM opt_out_token"),
+    );
+    expect(Number(rows[0]!.count)).toBe(1);
+  });
+
+  it("states the verification outcome honestly when tests failed", async () => {
+    const tenant = await seedProvider("wf-tests-failed");
+    const deps = buildDeps();
+    deps.agent.generate = async () => ({
+      diff: CLEAN_DIFF,
+      blastRadius: ["src/client.ts"],
+      summary: "Migrate acme-sdk callbacks to promises",
+      verification: { tests: "failed" as const, command: "npm test" },
+    });
+
+    await runWorkflow(tenant, deps);
+    const request = deps.forgeCalls[0] as { body: string };
+    expect(request.body).toContain("did not pass");
   });
 });
 
@@ -307,6 +374,7 @@ describe("policy enforcement in the pipeline", () => {
       diff: escalating,
       blastRadius: ["package.json"],
       summary: "Bump acme-sdk",
+      verification: { tests: "passed" as const, command: "npm test" },
     });
 
     const { status, outcome } = await runWorkflow(tenant, deps);
