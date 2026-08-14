@@ -65,8 +65,17 @@ export interface Config {
   readonly github: {
     readonly appId: string;
     readonly webhookSecret: Secret;
-    /** Key id in the KMS. The key itself never enters this process (ADR-0002). */
-    readonly signingKeyId: string;
+    /**
+     * How the App JWT gets signed. Exactly one, never both.
+     *
+     * `kms` is the destination (ADR-0002 §2): the key cannot be exported and
+     * the process can only request signatures. `file` is the bounded interim
+     * position (ADR-0012) — the key is in process memory, acceptable only
+     * while acting on repositories you own.
+     */
+    readonly signing:
+      | { readonly kind: "kms"; readonly keyId: string }
+      | { readonly kind: "file"; readonly path: string };
   };
   readonly http: {
     readonly port: number;
@@ -125,14 +134,38 @@ export function loadConfig(env: Env = process.env): Config {
     problems.push("GITHUB_WEBHOOK_SECRET must be at least 32 characters");
   }
 
-  const signingKeyId = require_("GITHUB_SIGNING_KEY_ID");
-  // The private key must never be an environment variable. If someone has set
-  // one, that is a misconfiguration worth refusing to start over rather than
-  // quietly ignoring — the key is now in the process environment either way.
+  // The private key must never be an environment variable. Environment
+  // variables leak into crash dumps, child processes, `docker inspect`,
+  // platform dashboards and support tickets — so a key that has been one is
+  // already compromised, and saying so is more useful than ignoring it.
   if (env["GITHUB_PRIVATE_KEY"] !== undefined) {
     problems.push(
-      "GITHUB_PRIVATE_KEY must not be set — the signing key stays in the KMS (ADR-0002). " +
-        "Rotate it: it has been exposed to this process's environment.",
+      "GITHUB_PRIVATE_KEY must not be set — a key in the environment is already " +
+        "exposed. Rotate it, then use GITHUB_SIGNING_KEY_ID (KMS) or " +
+        "GITHUB_PRIVATE_KEY_FILE (a file, mode 600). See ADR-0002 and ADR-0012.",
+    );
+  }
+
+  // Exactly one signing method. Accepting both would make it ambiguous which
+  // key actually signs, and the answer would be decided by code order rather
+  // than by anyone's intent.
+  const kmsKeyId = env["GITHUB_SIGNING_KEY_ID"]?.trim();
+  const keyFile = env["GITHUB_PRIVATE_KEY_FILE"]?.trim();
+  let signing: Config["github"]["signing"] | null = null;
+
+  if (kmsKeyId && keyFile) {
+    problems.push(
+      "Set GITHUB_SIGNING_KEY_ID or GITHUB_PRIVATE_KEY_FILE, not both — " +
+        "otherwise which key signs is decided by code order, not by you.",
+    );
+  } else if (kmsKeyId) {
+    signing = { kind: "kms", keyId: kmsKeyId };
+  } else if (keyFile) {
+    signing = { kind: "file", path: keyFile };
+  } else {
+    problems.push(
+      "One of GITHUB_SIGNING_KEY_ID (KMS, preferred) or GITHUB_PRIVATE_KEY_FILE " +
+        "(interim, see ADR-0012) is required",
     );
   }
 
@@ -173,7 +206,7 @@ export function loadConfig(env: Env = process.env): Config {
     github: {
       appId,
       webhookSecret: new Secret(webhookSecret, "GITHUB_WEBHOOK_SECRET"),
-      signingKeyId,
+      signing: signing as Config["github"]["signing"],
     },
     http: {
       port,

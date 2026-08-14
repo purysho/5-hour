@@ -63,6 +63,7 @@ orders every control.
 | HTTP server + worker lifecycle | `src/main/` |
 | Runnable entry points | `src/main/run-server.ts`, `src/main/run-worker.ts` |
 | Public homepage | `src/http/landing.ts` (served at `/`) |
+| File-backed signer (interim) | `src/github/signer.ts`, ADR-0012 |
 
 **Not started:** downstream repository discovery, the runner sandbox itself,
 migration generation, the dashboard. Detection has its gate, its version
@@ -157,6 +158,8 @@ make a change pass, stop.
    everything already exists in `src/workflows/migrate-repository.ts` with
    `MigrationAgent` and `ForgeClient` injected; what remains is real
    implementations of those two interfaces.
+
+**Deploying:** `docs/DEPLOYMENT.md`, start to finish.
 
 **If something breaks:** `docs/incident-response.md`. The one thing to
 remember is that halting outbound writes is a single UPDATE against

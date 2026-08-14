@@ -25,7 +25,6 @@ describe("refusing to start", () => {
       "DATABASE_URL",
       "GITHUB_APP_ID",
       "GITHUB_WEBHOOK_SECRET",
-      "GITHUB_SIGNING_KEY_ID",
       "PUBLIC_ORIGIN",
     ]) {
       const env = { ...VALID, [key]: undefined };
@@ -58,6 +57,38 @@ describe("refusing to start", () => {
     );
   });
 
+  it("requires a signing method", () => {
+    const env = { ...VALID, GITHUB_SIGNING_KEY_ID: undefined };
+    expect(() => loadConfig(env)).toThrow(/GITHUB_SIGNING_KEY_ID.*or.*GITHUB_PRIVATE_KEY_FILE/s);
+  });
+
+  it("refuses both signing methods at once", () => {
+    // Accepting both makes it ambiguous which key actually signs, and the
+    // answer would be decided by code order rather than by anyone's intent.
+    expect(() =>
+      loadConfig({ ...VALID, GITHUB_PRIVATE_KEY_FILE: "/etc/driftless/key.pem" }),
+    ).toThrow(/not both/);
+  });
+
+  it("accepts a key file as the interim signing method", () => {
+    const config = loadConfig({
+      ...VALID,
+      GITHUB_SIGNING_KEY_ID: undefined,
+      GITHUB_PRIVATE_KEY_FILE: "/etc/driftless/key.pem",
+    });
+    expect(config.github.signing).toEqual({
+      kind: "file",
+      path: "/etc/driftless/key.pem",
+    });
+  });
+
+  it("prefers KMS when that is what is configured", () => {
+    expect(loadConfig(VALID).github.signing).toEqual({
+      kind: "kms",
+      keyId: "arn:aws:kms:eu-west-1:1:key/abc",
+    });
+  });
+
   it("rejects a private key in the environment", () => {
     // The signing key belongs in the KMS (ADR-0002). If one is in the
     // environment it is already exposed, so refusing to start AND saying to
@@ -71,6 +102,7 @@ describe("refusing to start", () => {
       return null;
     })();
     expect(error?.message).toContain("must not be set");
+    expect(error?.message).toContain("already");
     expect(error?.message).toContain("Rotate it");
   });
 

@@ -62,12 +62,13 @@ Then the decision records:
 | [0009](docs/adr/0009-postgres-backed-durable-execution.md) | Postgres-backed durable execution |
 | [0010](docs/adr/0010-role-separation-for-platform-access.md) | Separate login roles for tenant and platform access |
 | [0011](docs/adr/0011-credential-broker-phase-gating.md) | Credentials brokered outside the sandbox, gated by phase |
+| [0012](docs/adr/0012-interim-file-backed-signing-key.md) | Interim file-backed signing key, bounded by a stated trigger |
 
 [ADR-0008](docs/adr/0008-deferred-concerns.md) is worth reading early. It
 records what is deliberately *not* being built yet and what would change that.
 
 [Incident response](docs/incident-response.md) covers severities, playbooks,
-and the kill switch.
+and the kill switch. [Deployment](docs/DEPLOYMENT.md) covers setup end to end.
 
 ## Architecture
 

@@ -1,4 +1,5 @@
 import { createSign, createPrivateKey, type KeyObject } from "node:crypto";
+import { readFileSync, statSync } from "node:fs";
 
 /**
  * App authentication signing (ADR-0002 §2).
@@ -70,6 +71,94 @@ export class LocalSigner implements Signer {
     }
     this.#key = createPrivateKey(privateKeyPem);
     this.keyId = keyId;
+  }
+
+  sign(data: Buffer): Promise<Buffer> {
+    const signer = createSign("RSA-SHA256");
+    signer.update(data);
+    signer.end();
+    return Promise.resolve(signer.sign(this.#key));
+  }
+}
+
+/**
+ * File-backed signer. The interim position, not the destination.
+ *
+ * ── Why this exists ─────────────────────────────────────────────────────────
+ *
+ * ADR-0002 says the key lives in a KMS. That remains correct and remains the
+ * target. But a solo team registering a GitHub App today has a PEM that GitHub
+ * generated and handed them, and no KMS. The realistic options are:
+ *
+ *   1. Block all progress until KMS is provisioned.
+ *   2. Put the key in an environment variable.
+ *   3. Read it from a file, with the risk written down and bounded.
+ *
+ * (1) is theatre — it does not make anyone safer, it just stops the work.
+ * (2) is the failure mode `loadConfig` refuses outright: environment variables
+ * leak into crash dumps, child processes, `docker inspect`, platform dashboards
+ * and support tickets. (3) is worse than KMS and much better than (2), so it
+ * is what this class does — loudly, with guards, and with a stated trigger for
+ * when it must stop (ADR-0012).
+ *
+ * ── The guards ──────────────────────────────────────────────────────────────
+ *
+ * Production requires explicit, awkward acknowledgement. The variable name is
+ * deliberately unpleasant to type and impossible to set by accident, because
+ * the whole risk of an escape hatch is that it becomes the default.
+ *
+ * The file must not be group- or world-readable. A key at mode 0644 on a
+ * shared host is a key everyone on that host has.
+ */
+export class FileSigner implements Signer {
+  readonly #key: KeyObject;
+  readonly keyId: string;
+
+  static readonly ACK_VAR = "DRIFTLESS_ACCEPT_IN_PROCESS_SIGNING_KEY";
+  static readonly ACK_VALUE = "yes-i-know-this-is-not-a-kms";
+
+  constructor(
+    path: string,
+    options: { keyId?: string; env?: NodeJS.ProcessEnv } = {},
+  ) {
+    const env = options.env ?? process.env;
+
+    if (env["NODE_ENV"] === "production" && env[FileSigner.ACK_VAR] !== FileSigner.ACK_VALUE) {
+      throw new Error(
+        `Refusing to hold the GitHub App private key in process memory in production.\n` +
+          `The key belongs in a KMS where it cannot be exported (ADR-0002 §2).\n` +
+          `If you are knowingly accepting this — see ADR-0012, which bounds it to ` +
+          `repositories you own — set ${FileSigner.ACK_VAR}=${FileSigner.ACK_VALUE}.`,
+      );
+    }
+
+    let mode: number;
+    try {
+      mode = statSync(path).mode;
+    } catch {
+      throw new Error(`Signing key file not found or unreadable: ${path}`);
+    }
+
+    // 0o077 covers group and other. A private key readable by anyone else on
+    // the host is not private.
+    if ((mode & 0o077) !== 0) {
+      throw new Error(
+        `Signing key file ${path} is group- or world-readable (mode ` +
+          `${(mode & 0o777).toString(8)}). Run: chmod 600 ${path}`,
+      );
+    }
+
+    const pem = readFileSync(path, "utf8");
+    if (!pem.includes("PRIVATE KEY")) {
+      throw new Error(
+        `${path} does not look like a private key. GitHub's download is named ` +
+          `<app>.<date>.private-key.pem and begins with -----BEGIN RSA PRIVATE KEY-----.`,
+      );
+    }
+
+    this.#key = createPrivateKey(pem);
+    // The path, never the contents. This ends up in logs and the audit chain.
+    this.keyId = options.keyId ?? `file:${path}`;
   }
 
   sign(data: Buffer): Promise<Buffer> {
