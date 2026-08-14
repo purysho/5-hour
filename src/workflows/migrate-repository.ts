@@ -72,8 +72,19 @@ export interface MigrationAgent {
     /** Repository content, already wrapped. Never interpolated (ADR-0003). */
     sources: readonly { path: string; content: UntrustedContent }[];
     changeSummary: string;
+    /**
+     * Symbols the upstream change impacted. The agent derives the blast radius
+     * from these, deterministically and before any inference — which is what
+     * keeps the radius it returns from being a description of its own
+     * footprint (ADR-0013).
+     */
+    impactedSymbols: readonly string[];
   }): Promise<{
     diff: string;
+    /**
+     * The files the migration was permitted to touch. Computed from the
+     * upstream change before generation, never from the generated diff.
+     */
     blastRadius: readonly string[];
     summary: string;
     /**
@@ -227,6 +238,11 @@ export function migrateRepositoryWorkflow(deps: MigrationDeps) {
         repository: loaded.repository,
         sources,
         changeSummary: loaded.changeSummary,
+        // From our own change record, not from the agent. The blast radius the
+        // policy engine enforces below is derived from these, so letting the
+        // agent supply them would let a generated migration choose the bound
+        // it is then judged against.
+        impactedSymbols: loaded.change.impactedSymbols,
       });
     });
 

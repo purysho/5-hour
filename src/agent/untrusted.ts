@@ -92,8 +92,17 @@ export class UntrustedContent {
   }
 
   /**
-   * The one legitimate reader, used by prompt assembly. Namespaced and ugly on
-   * purpose: it should be obvious in review when something else calls it.
+   * The only reader. Namespaced and ugly on purpose: every call site should be
+   * conspicuous in review, and there should be very few of them.
+   *
+   * Two exist:
+   *
+   *   `assemblePrompt`, below — the single route into a model call.
+   *   `ClaudeMigrationAgent.generate` — deterministic analysis of the same
+   *   content: substring matching for the blast radius and substring
+   *   replacement when applying edits. Neither is a prompt.
+   *
+   * A third call site is a design change, not a refactor.
    *
    * @internal
    */

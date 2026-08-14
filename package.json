@@ -21,6 +21,7 @@
     "start:server": "node --experimental-strip-types src/main/run-server.ts"
   },
   "dependencies": {
+    "@anthropic-ai/sdk": "^0.117.1",
     "pg": "^8.13.1"
   },
   "devDependencies": {

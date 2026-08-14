@@ -63,6 +63,7 @@ Then the decision records:
 | [0010](docs/adr/0010-role-separation-for-platform-access.md) | Separate login roles for tenant and platform access |
 | [0011](docs/adr/0011-credential-broker-phase-gating.md) | Credentials brokered outside the sandbox, gated by phase |
 | [0012](docs/adr/0012-interim-file-backed-signing-key.md) | Interim file-backed signing key, bounded by a stated trigger |
+| [0013](docs/adr/0013-model-output-is-a-proposal.md) | Model output is a proposal, applied deterministically |
 
 [ADR-0008](docs/adr/0008-deferred-concerns.md) is worth reading early. It
 records what is deliberately *not* being built yet and what would change that.
@@ -141,6 +142,10 @@ must talk to the outside world.
 - The git credential helper and phase-gated broker — the token never enters the
   sandbox, and the credential path is armed only during clone and push
 - The runner environment builder and egress allowlist
+- Migration generation: the model returns anchored replacements rather than a
+  patch, Driftless applies them and renders the diff itself, and the blast
+  radius is fixed before inference — proven against a fully compromised model
+  that returns whatever an attack asks for
 - The migration workflow composing all of the above, tested end to end through
   the real queue and database with only the model and the forge injected
 - Detection: semver precedence, npm range satisfaction, registry and artifact
@@ -150,9 +155,11 @@ must talk to the outside world.
 
 **Not built yet**
 
-The runner isolation itself (gVisor or Firecracker), migration generation, a
-real KMS signer, webhook ingestion, the dependent-repository crawler that feeds
-impact classification, and the dashboard.
+The runner isolation itself (gVisor or Firecracker) — and therefore test
+verification, which is reported honestly as `not-run` until it exists — a real
+KMS signer, the forge client that opens the pull request, the
+dependent-repository crawler that feeds impact classification, and the
+dashboard.
 
 ## Getting started
 
@@ -180,6 +187,7 @@ docs/
 migrations/            forward-only SQL; RLS and the idempotency invariant
 src/
   agent/untrusted.ts   instruction/data boundary (ADR-0003)
+  agent/edit-plan.ts   the model's proposal, validated and applied (ADR-0013)
   audit/verify.ts      chain verifier customers can run themselves (ADR-0007)
   db/client.ts         tenant and platform database access (ADR-0005, ADR-0010)
   github/              app auth and scoped credentials (ADR-0002)

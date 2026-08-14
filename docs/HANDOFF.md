@@ -125,6 +125,24 @@ make a change pass, stop.
    promise — and comes back as a plain string with its untrusted marking gone.
    Acquire both inside the step that consumes them. Both types throw or redact
    on serialisation, so violating this fails loudly.
+13. **The model proposes; Driftless applies.** The model returns anchored
+   replacements, never a patch, and never a path it was not shown. Driftless
+   applies them and renders the diff itself, so the artifact the policy engine
+   reads is the artifact that was applied. Do not add a `create`, `delete`,
+   `rename`, or `mode` field to the proposal — their absence is the control.
+   See ADR-0013.
+14. **The blast radius is computed before inference and is not negotiable
+   afterwards.** It comes from the impacted symbols in our own change record,
+   never from the agent's output. An agent that supplied its own bound would
+   be judged against a limit it chose.
+15. **Model prose never reaches a maintainer.** `composePullRequest` takes
+   structured facts only. The proposal's one free-text field is for our logs,
+   and the injection signal carries paths rather than a description of what
+   the model saw — a description is a copy of the payload.
+16. **Verification is reported honestly.** Until the sandbox exists the agent
+   says `not-run`, and the pull request body says so too. A migration
+   presented as verified when it is not destroys the only thing that makes
+   these pull requests worth opening.
 
 ## Next, in order
 
@@ -153,11 +171,15 @@ make a change pass, stop.
    gVisor or Firecracker, single-use instances, the proxy that enforces the
    allowlist. Do not ship a shared-kernel container and promise to fix it
    later.
-6. **Migration generation**, last — it is the part that looks like the product
-   but is worthless without everything above it. The workflow that composes
-   everything already exists in `src/workflows/migrate-repository.ts` with
-   `MigrationAgent` and `ForgeClient` injected; what remains is real
-   implementations of those two interfaces.
+6. **Migration generation.** `ClaudeMigrationAgent` is done (ADR-0013):
+   anchored replacements against the Claude API, a blast radius fixed before
+   inference, deterministic application, and a diff Driftless renders itself.
+   `src/agent/unified-diff.ts` is round-tripped against real `git apply` and
+   against the parser that feeds the policy engine. What remains here is the
+   `Verifier` — which is blocked on the sandbox, item 5 — and a `ForgeClient`
+   that actually opens the pull request. Until both exist,
+   `src/main/run-worker.ts` declines to register `migrate-repository` and logs
+   the remaining blockers individually.
 
 **Deploying:** `docs/DEPLOYMENT.md`, start to finish.
 
@@ -228,7 +250,7 @@ Schema reset happens once in global setup — never in per-file setup, or test
 files racing in separate workers will drop the schema underneath each other.
 
 Global setup creates two login roles, `driftless_app_login` and
-`driftless_worker_login`. Do not collapse them into one — see non-negotiable 8
+`driftless_worker_login`. Do not collapse them into one — see non-negotiable 10
 and ADR-0010.
 
 ## Open questions

@@ -6,12 +6,14 @@
  *
  * ── On refusing to start ─────────────────────────────────────────────────────
  *
- * `migrate-repository` composes a model that writes diffs and a forge client
- * that opens pull requests. Both are injected interfaces with no production
- * implementation yet (see docs/HANDOFF.md). The tempting shape is to register
- * the workflow with stubs so the process boots and "works" until it reaches
- * one — which means a worker that dequeues real jobs, burns their retry
- * budget, and fails them for reasons that have nothing to do with the job.
+ * `migrate-repository` composes a model that proposes migrations and a forge
+ * client that opens pull requests. The first now has a production
+ * implementation (`ClaudeMigrationAgent`, ADR-0013); the second does not, and
+ * neither does the sandbox that would make running a repository's test suite
+ * safe (see docs/HANDOFF.md). The tempting shape is to register the workflow
+ * with stubs so the process boots and "works" until it reaches one — which
+ * means a worker that dequeues real jobs, burns their retry budget, and fails
+ * them for reasons that have nothing to do with the job.
  *
  * Refusing to register an incomplete workflow means those jobs stay queued
  * until a worker that can actually run them exists. Queued is a recoverable
@@ -95,12 +97,21 @@ queue.register({
 // Deliberately NOT registered. See the file comment: registering it with stubs
 // would mean dequeuing real jobs and failing them for reasons unrelated to the
 // job itself.
+//
+// The blockers are logged individually rather than as one flag, so an operator
+// can see which of them they have cleared.
+
+const migrationBlockers = [
+  ...(config.anthropic.apiKey ? [] : ["ANTHROPIC_API_KEY is not set"]),
+  "no ForgeClient implementation",
+  "no sandbox for test verification (ADR-0006)",
+];
 
 log("worker starting", {
   workerId,
   env: config.env,
   workflows: ["detect-changes"],
-  unregistered: ["migrate-repository (no MigrationAgent/ForgeClient implementation)"],
+  unregistered: [`migrate-repository (${migrationBlockers.join("; ")})`],
 });
 
 const worker = startWorker(queue, {

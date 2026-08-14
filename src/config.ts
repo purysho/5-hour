@@ -77,6 +77,15 @@ export interface Config {
       | { readonly kind: "kms"; readonly keyId: string }
       | { readonly kind: "file"; readonly path: string };
   };
+  /**
+   * Migration generation (ADR-0013).
+   *
+   * Optional, because the two processes need different things: the server
+   * never generates a migration, and a worker running only `detect-changes`
+   * does not either. A worker that finds it absent declines to register
+   * `migrate-repository` rather than dequeuing jobs it cannot finish.
+   */
+  readonly anthropic: { readonly apiKey: Secret | null };
   readonly http: {
     readonly port: number;
     /** Public origin, used to build opt-out links. */
@@ -188,6 +197,14 @@ export function loadConfig(env: Env = process.env): Config {
   // returned object. Parsing them after the throw would mean their validation
   // could never fail the load — the errors would be pushed to an array nobody
   // reads again. Found by a test asserting PORT=0 is rejected.
+  // Present or absent, never partially present: a truncated key produces a 401
+  // on the first migration rather than at startup, which is the wrong place to
+  // discover a copy-paste error.
+  const anthropicKey = env["ANTHROPIC_API_KEY"]?.trim();
+  if (anthropicKey !== undefined && anthropicKey !== "" && anthropicKey.length < 20) {
+    problems.push("ANTHROPIC_API_KEY looks truncated");
+  }
+
   const port = number_("PORT", 8080, 1, 65535);
   const concurrency = number_("WORKER_CONCURRENCY", 4, 1, 64);
   const pollIntervalMs = number_("WORKER_POLL_INTERVAL_MS", 1000, 100, 60_000);
@@ -207,6 +224,9 @@ export function loadConfig(env: Env = process.env): Config {
       appId,
       webhookSecret: new Secret(webhookSecret, "GITHUB_WEBHOOK_SECRET"),
       signing: signing as Config["github"]["signing"],
+    },
+    anthropic: {
+      apiKey: anthropicKey ? new Secret(anthropicKey, "ANTHROPIC_API_KEY") : null,
     },
     http: {
       port,

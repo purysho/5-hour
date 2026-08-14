@@ -194,6 +194,25 @@ describe("defaults and derivation", () => {
     expect(Secret.reveal(config.platformDatabaseUrl)).toContain("user=worker");
   });
 
+  it("treats the model API key as optional", () => {
+    // The server never generates a migration, and a worker running only
+    // detect-changes does not either. Requiring it everywhere would mean the
+    // whole system refuses to start over a capability most of it never uses.
+    expect(loadConfig(VALID).anthropic.apiKey).toBeNull();
+  });
+
+  it("rejects a truncated model API key at startup", () => {
+    // Otherwise the copy-paste error surfaces as a 401 on the first migration,
+    // which is the wrong place to discover it.
+    expect(() => loadConfig({ ...VALID, ANTHROPIC_API_KEY: "sk-ant-" })).toThrow(/truncated/);
+  });
+
+  it("redacts the model API key like every other secret", () => {
+    const config = loadConfig({ ...VALID, ANTHROPIC_API_KEY: `sk-ant-${"k".repeat(40)}` });
+    expect(JSON.stringify(config)).not.toContain("kkkk");
+    expect(Secret.reveal(config.anthropic.apiKey!)).toContain("sk-ant-");
+  });
+
   it("builds opt-out links without a double slash", () => {
     const config = loadConfig({ ...VALID, PUBLIC_ORIGIN: "https://driftless.dev/" });
     expect(optOutUrl(config, "abc123")).toBe("https://driftless.dev/opt-out/abc123");

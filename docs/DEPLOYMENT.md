@@ -154,6 +154,11 @@ GITHUB_SIGNING_KEY_ID=arn:aws:kms:...       # preferred
 GITHUB_PRIVATE_KEY_FILE=/etc/driftless/github-app.pem
 DRIFTLESS_ACCEPT_IN_PROCESS_SIGNING_KEY=yes-i-know-this-is-not-a-kms
 
+# Required only on a worker that generates migrations (ADR-0013).
+# Without it the worker runs detect-changes and declines to register
+# migrate-repository, saying so in its startup log.
+ANTHROPIC_API_KEY=sk-ant-...
+
 # Optional
 PORT=8080
 WORKER_CONCURRENCY=4
@@ -178,11 +183,15 @@ Then turn on webhooks in the App settings, pointed at
 `https://<origin>/webhooks/github`, and uninstall/reinstall the App on your
 test repository. The worker log should show the installation event applied.
 
-The worker deliberately registers only `detect-changes`. It refuses to
-register `migrate-repository` until `MigrationAgent` and `ForgeClient` have
-real implementations — registering it with stubs would dequeue real jobs and
-burn their retry budget failing for reasons unrelated to the job. Queued is
-recoverable; failed-and-retried-to-death is not.
+The worker deliberately registers only `detect-changes`. `MigrationAgent` now
+has a production implementation (`ClaudeMigrationAgent`), but `ForgeClient`
+does not and neither does the sandbox that test verification needs, so
+`migrate-repository` stays unregistered — registering it with stubs would
+dequeue real jobs and burn their retry budget failing for reasons unrelated to
+the job. Queued is recoverable; failed-and-retried-to-death is not.
+
+The startup log lists the remaining blockers individually, so you can see which
+ones you have cleared.
 
 ---
 
