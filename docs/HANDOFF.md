@@ -54,6 +54,7 @@ orders every control.
 | Audit sink for token mints | `src/audit/sink.ts`, `test/audit/sink.test.ts` |
 | Production dependency wiring | `src/main/wiring.ts`, `test/main/wiring.test.ts` |
 | Approval → rollout trigger | `src/schedule/approval-trigger.ts`, `migrations/010_approved_changes.sql` |
+| Test verification architecture | `src/sandbox/gvisor-verifier.ts`, `docs/SANDBOX_SETUP.md` |
 | Change corroboration + canary sizing | `src/detect/corroborate.ts`, `test/detect/` |
 | Semver precedence + breaking detection | `src/detect/semver.ts` |
 | npm registry + artifact collectors | `src/detect/npm.ts` |
@@ -71,7 +72,7 @@ orders every control.
 | Public homepage | `src/http/landing.ts` (served at `/`) |
 | File-backed signer (interim) | `src/github/signer.ts`, ADR-0012 |
 
-**Not started:** the runner sandbox itself, and the dashboard.
+**Not started:** the dashboard.
 
 The pipeline is now connected end to end: an installation webhook records
 repositories, the scheduler sweeps watched packages, a human sets
@@ -85,9 +86,14 @@ The credential layer is complete in logic and now wired to a real GitHub App
 in `run-worker.ts`. It is still not wired to a real KMS (ADR-0012 governs the
 interim file-backed signer) or to the unix-socket transport.
 
-Two honest gaps worth knowing before reading further. There is no sandbox, so
-every migration reports `tests: not-run` — in the pull request body and in the
-worker's startup log. And `downstreamCount` is the tenant's installed
+**P3: Test verification sandbox.** The `Verifier` interface is scaffolded
+(gVisor-based) and integrated into `ClaudeMigrationAgent`. Currently returns
+`not-run` to maintain honest reporting until gVisor infrastructure is deployed
+on the worker host. See `docs/SANDBOX_SETUP.md` for deployment steps. Once
+deployed, tests will be reported as `passed`, `failed`, or `error` instead of
+`not-run`, making migrations in PRs honestly verified per ADR-0006.
+
+One remaining honest gap: `downstreamCount` is the tenant's installed
 repository count rather than the number of repositories that declare the
 package, because nothing stores the latter; it is an upper bound, used only
 where an upper bound is safe.
@@ -215,11 +221,13 @@ make a change pass, stop.
    *not* transfer to `dts-surface.ts`, where an approximation would decide
    whether a change is breaking.
 
-5. **Runner sandbox** per ADR-0006. The environment builder and egress
-   allowlist exist and are tested; what remains is the isolation itself —
-   gVisor or Firecracker, single-use instances, the proxy that enforces the
-   allowlist. Do not ship a shared-kernel container and promise to fix it
-   later.
+5. **Runner sandbox** per ADR-0006. The `Verifier` interface is scaffolded
+   with gVisor architecture and integrated into the agent (P3, done). What
+   remains is infrastructure deployment: install gVisor (`runsc` binary) on the
+   worker host, prepare a Node.js rootfs, and implement the `runInGVisor()`
+   function that orchestrates sandbox lifecycle. See `docs/SANDBOX_SETUP.md` for
+   complete deployment guide. Once deployed, tests will be reported as `passed`,
+   `failed`, or `error` rather than `not-run`.
 6. **Migration generation.** `ClaudeMigrationAgent` is done (ADR-0013):
    anchored replacements against the Claude API, a blast radius fixed before
    inference, deterministic application, and a diff Driftless renders itself.
