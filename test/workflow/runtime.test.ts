@@ -248,7 +248,6 @@ describe("failure classification", () => {
       job(),
       {
         name: "test",
-        // eslint-disable-next-line @typescript-eslint/only-throw-error
         handler: async () => Promise.reject("just a string"),
       },
       new MemoryStepRecorder(),

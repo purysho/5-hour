@@ -153,7 +153,6 @@ export function parseEditPlan(raw: unknown): EditPlan {
 function sanitiseSummary(raw: unknown): string {
   if (typeof raw !== "string") return "";
   const flattened = raw
-    // eslint-disable-next-line no-control-regex
     .replace(/[\u0000-\u001f\u007f-\u009f]/g, " ")
     .replace(/\s+/g, " ")
     .trim();
