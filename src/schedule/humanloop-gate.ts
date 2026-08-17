@@ -41,10 +41,26 @@ interface HumanLoopApiTask {
   reviewer_id?: string;
   created_at: string;
   completed_at?: string;
+  /**
+   * Set when the reviewer wants a second pair of eyes without blocking the
+   * merge. Carried through to the caller rather than dropped: an escalation
+   * that never leaves this function is the same as no escalation at all.
+   */
+  escalated?: boolean;
 }
 
 const DEFAULT_TIMEOUT_SECONDS = 600; // 10 minutes
-const POLL_INTERVAL_MS = 10_000; // Poll every 10 seconds
+const DEFAULT_POLL_INTERVAL_MS = 10_000; // Poll every 10 seconds
+
+export interface HumanLoopOptions {
+  readonly log?: (event: string, detail: Record<string, unknown>) => void;
+  /**
+   * Overridden in tests. The timeout path is the safety-critical one — it must
+   * never auto-approve — and with a hard-coded ten-second poll there was no way
+   * to reach it in a unit test, so it went unverified.
+   */
+  readonly pollIntervalMs?: number;
+}
 
 /**
  * Formats review findings into a markdown prompt for the human reviewer.
@@ -106,9 +122,10 @@ ${input.diff.length > 2000 ? "\n... (full diff available in PR)\n" : ""}
  */
 export async function submitToHumanLayer(
   input: HumanLoopInput,
-  options: { log?: (event: string, detail: Record<string, unknown>) => void } = {},
+  options: HumanLoopOptions = {},
 ): Promise<HumanLoopResult> {
   const log = options.log ?? (() => {});
+  const pollIntervalMs = options.pollIntervalMs ?? DEFAULT_POLL_INTERVAL_MS;
   const timeoutSeconds = input.timeoutSeconds ?? DEFAULT_TIMEOUT_SECONDS;
 
   log("humanloop.submit_start", {
@@ -138,6 +155,7 @@ export async function submitToHumanLayer(
         taskId,
         reviewerId: task.reviewer_id,
         feedback: task.feedback,
+        escalated: task.escalated ?? false,
       });
 
       return {
@@ -145,7 +163,7 @@ export async function submitToHumanLayer(
         feedback: task.feedback ?? "",
         reviewerId: task.reviewer_id ?? "unknown",
         decisionTimestamp: task.completed_at ? new Date(task.completed_at).getTime() : Date.now(),
-        escalated: false,
+        escalated: task.escalated ?? false,
       };
     }
 
@@ -154,6 +172,7 @@ export async function submitToHumanLayer(
         taskId,
         reviewerId: task.reviewer_id,
         feedback: task.feedback,
+        escalated: task.escalated ?? false,
       });
 
       return {
@@ -161,7 +180,7 @@ export async function submitToHumanLayer(
         feedback: task.feedback ?? "No feedback provided",
         reviewerId: task.reviewer_id ?? "unknown",
         decisionTimestamp: task.completed_at ? new Date(task.completed_at).getTime() : Date.now(),
-        escalated: false,
+        escalated: task.escalated ?? false,
       };
     }
 
@@ -175,7 +194,7 @@ export async function submitToHumanLayer(
     }
 
     // Still pending, wait before polling again
-    await new Promise((resolve) => setTimeout(resolve, POLL_INTERVAL_MS));
+    await new Promise((resolve) => setTimeout(resolve, pollIntervalMs));
   }
 
   // Timeout reached without decision

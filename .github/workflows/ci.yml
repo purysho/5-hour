@@ -13,8 +13,12 @@ concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: true
 
+# Passwordless, to match how the suite connects. `test/db/setup.ts` derives two
+# non-superuser roles from this URL and clears the password, because those roles
+# are created without one — running the suite as a superuser would bypass RLS and
+# turn every isolation assertion into a tautology (ADR-0004, ADR-0005).
 env:
-  DATABASE_URL: postgresql://postgres:postgres@localhost:5432/driftless_test
+  DATABASE_URL: postgresql://postgres@localhost:5432/driftless_test
 
 jobs:
   verify:
@@ -25,7 +29,12 @@ jobs:
       postgres:
         image: postgres:16
         env:
-          POSTGRES_PASSWORD: postgres
+          # Trust auth, so the two passwordless login roles the suite creates can
+          # connect over TCP. Under the default scram-sha-256 they cannot, which
+          # is what kept this job red. Safe here and nowhere else: the container
+          # is ephemeral, reachable only from this job's network, and holds
+          # nothing but throwaway fixtures.
+          POSTGRES_HOST_AUTH_METHOD: trust
           POSTGRES_DB: driftless_test
         ports: ["5432:5432"]
         options: >-
@@ -52,6 +61,11 @@ jobs:
 
       - name: Typecheck
         run: pnpm typecheck
+
+      # `pnpm lint` existed but no job ran it, so the only thing enforcing it was
+      # somebody remembering to. Gated here for the same reason as the rest.
+      - name: Lint
+        run: pnpm lint
 
       # ADR-0003 makes the adversarial corpus a blocking gate. It runs inside
       # the suite below; it is called out here so that anyone tempted to add

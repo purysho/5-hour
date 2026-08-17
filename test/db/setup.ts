@@ -17,8 +17,32 @@ export const ADMIN_URL =
   process.env["DATABASE_URL"] ??
   "postgresql://postgres@localhost:5433/driftless_test?host=/tmp/pgrun";
 
-export const APP_URL = ADMIN_URL.replace("postgres@", "driftless_app_login@");
-export const PLATFORM_URL = ADMIN_URL.replace("postgres@", "driftless_worker_login@");
+/**
+ * Returns `connectionString` with its user swapped and any password dropped.
+ *
+ * Parsed rather than string-replaced. The previous version did
+ * `ADMIN_URL.replace("postgres@", "driftless_app_login@")`, which is correct
+ * only for a passwordless URL. Given CI's
+ * `postgresql://postgres:postgres@host/db`, the literal `postgres@` matches at
+ * the *password* position instead, yielding
+ * `postgresql://postgres:driftless_app_login@host/db` — user still `postgres`,
+ * password now a role name. Every connection then failed with "password
+ * authentication failed for user postgres", and CI had never once been green.
+ *
+ * The password is cleared deliberately: `driftless_app_login` and
+ * `driftless_worker_login` are created without one, so they authenticate only
+ * where the server trusts the connection. Carrying the admin password over
+ * would be a silent lie about who is connecting.
+ */
+export function withUser(connectionString: string, user: string): string {
+  const url = new URL(connectionString);
+  url.username = user;
+  url.password = "";
+  return url.toString();
+}
+
+export const APP_URL = withUser(ADMIN_URL, "driftless_app_login");
+export const PLATFORM_URL = withUser(ADMIN_URL, "driftless_worker_login");
 
 /**
  * Retained so test files read declaratively. Schema preparation already
