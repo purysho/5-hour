@@ -23,6 +23,57 @@ Driftless has three components:
    - RLS enforces multi-tenant isolation (one row per provider/customer)
    - Migrations create schema and roles
 
+## Deploying on Railway
+
+The rest of this guide provisions AWS directly. Railway is the shortcut, and the
+one thing to get right there is that **the server and the worker are two
+services, not one.** A Railway service runs a single process, and the two
+components above are not interchangeable:
+
+| Railway service | Start command | Public? | Purpose |
+| --- | --- | --- | --- |
+| `Driftless` | `pnpm start:server` | yes | GitHub webhooks, opt-out pages |
+| `Driftless-worker` | `pnpm start:worker` | no | job queue, scheduler, approval trigger |
+
+`pnpm start` is an alias for `start:server`, because the server is the half that
+has to be publicly reachable — GitHub cannot deliver a webhook to a private
+service. Railpack looks for `start` and fails the build outright when it is
+absent, which is what "No start command detected" meant.
+
+Deploying only the `Driftless` service leaves you with a system that records
+installations and then does nothing with them: no sweeps, no rollouts, no
+migrations. The worker is not optional, it is just not the one with a URL.
+
+`railway.json` pins the builder, the start command, and `/health` as the
+healthcheck path. Override `startCommand` on the worker service to
+`pnpm start:worker`.
+
+### Required environment variables
+
+The server refuses to boot without all of these, by design — `loadConfig`
+validates and then throws rather than starting half-configured:
+
+| Variable | Notes |
+| --- | --- |
+| `DATABASE_URL` | Railway Postgres provides this; reference it as `${{Postgres.DATABASE_URL}}` |
+| `GITHUB_APP_ID` | numeric, from the App settings page |
+| `GITHUB_WEBHOOK_SECRET` | **at least 32 characters** |
+| `PUBLIC_ORIGIN` | must be `https` when `NODE_ENV=production` |
+| `GITHUB_SIGNING_KEY_ID` **or** `GITHUB_PRIVATE_KEY_FILE` | exactly one, never both (ADR-0002 §2, ADR-0012) |
+
+`PORT` is injected by Railway and honoured; the default is 8080 otherwise. The
+worker additionally wants `ANTHROPIC_API_KEY` — without it `migrate-repository`
+stays unregistered and its jobs stay queued, which is deliberate (see the header
+of `run-worker.ts`).
+
+### Migrations
+
+Run `pnpm db:migrate` against the production database **before** the first
+deploy, and after any deploy that adds a migration. It is deliberately not wired
+to `preDeployCommand`: the migrations create roles and RLS policies, and a schema
+change that runs automatically on every push is one nobody reviewed. Add it there
+yourself if you would rather trade that review for the convenience.
+
 ## Prerequisites
 
 ### AWS Account & CLI
