@@ -1,0 +1,22 @@
+{
+  "permissions": {
+    "allow": [
+      "Edit(*)",
+      "Write(*)",
+      "Bash(*)",
+      "WebFetch(*)",
+      "WebSearch"
+    ],
+    "ask": [
+      "Bash(rm *)",
+      "Bash(rmdir *)",
+      "Bash(git push *)",
+      "Bash(git reset *)"
+    ]
+  },
+  "outputStyle": "Detailed",
+  "respectGitignore": true,
+  "attribution": {
+    "commit": "Co-Authored-By: Claude <noreply@anthropic.com>"
+  }
+}
