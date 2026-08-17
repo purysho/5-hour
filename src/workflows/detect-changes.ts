@@ -78,8 +78,15 @@ export interface DetectDeps {
   readonly collector: NpmCollector;
   readonly surfaces: SurfaceSource;
   readonly recorder: ChangeRecorder;
-  /** How many downstream repositories are known. Sizes the canary. */
-  readonly downstreamCount: (packageName: string) => Promise<number>;
+  /**
+   * How many downstream repositories are known. Sizes the canary.
+   *
+   * Takes the provider explicitly. The count is tenant-scoped — one provider
+   * must not learn the size of another's estate from a canary width — and a
+   * dependency that reads the tenant from ambient state is one refactor away
+   * from reading the wrong one.
+   */
+  readonly downstreamCount: (packageName: string, providerId: string) => Promise<number>;
 }
 
 export type DetectOutcome =
@@ -215,7 +222,7 @@ export function detectChangesWorkflow(deps: DetectDeps) {
     );
 
     const downstream = await ctx.step("count-downstream", async () =>
-      deps.downstreamCount(input.packageName),
+      deps.downstreamCount(input.packageName, ctx.providerId),
     );
 
     ctx.log("change eligible", {

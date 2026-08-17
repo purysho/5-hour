@@ -58,6 +58,7 @@ import {
   decideTarget,
   prioritise,
   type EligibilityRules,
+  type Impact,
   type RepositoryCandidate,
   type TargetDecision,
 } from "../discover/affected.ts";
@@ -90,6 +91,13 @@ export interface StoredChange {
 export interface CandidateRepository {
   readonly repositoryId: string;
   readonly installationId: string;
+  /**
+   * GitHub's numeric ids. Not used by the planning logic at all — carried
+   * because `readManifest` has to mint a token to read anything, and ADR-0002
+   * scopes a token by numeric repository id rather than by coordinates.
+   */
+  readonly forgeRepositoryId: number;
+  readonly forgeInstallationId: number;
   readonly forgeOwner: string;
   readonly forgeName: string;
   readonly defaultBranch: string;
@@ -120,6 +128,7 @@ export interface RolloutDeps {
    */
   readonly readManifest: (
     repository: CandidateRepository,
+    providerId: string,
   ) => Promise<RepositoryManifest | null>;
   /**
    * Enqueues one migration. Must be idempotent on the dedupe key — this
@@ -132,6 +141,19 @@ export interface RolloutDeps {
     installationId: string;
     changeId: string;
     baseSha: string;
+    /**
+     * How this repository is affected, as classified here against the manifest
+     * at `baseSha`.
+     *
+     * Carried into the job rather than recomputed by the migration, and that
+     * is deliberate. It is the sentence the pull request opens with — "your
+     * declared range excludes this version" versus "your next install will
+     * pick it up" — so two independent derivations of it are two chances to
+     * tell a maintainer something untrue about their own repository. This one
+     * was computed from the manifest at the commit the migration is pinned to,
+     * which is the only reading that matches the diff.
+     */
+    impact: Impact;
     dedupeKey: string;
   }) => Promise<{ created: boolean }>;
   readonly withTenant: <T>(
@@ -245,7 +267,7 @@ export function planRolloutWorkflow(deps: RolloutDeps) {
       const skipped: SkippedRepository[] = [];
 
       for (const repository of candidates) {
-        const manifest = await deps.readManifest(repository);
+        const manifest = await deps.readManifest(repository, ctx.providerId);
         if (!manifest) {
           skipped.push({
             owner: repository.forgeOwner,
@@ -345,6 +367,7 @@ export function planRolloutWorkflow(deps: RolloutDeps) {
           installationId: entry.repository.installationId,
           changeId: input.changeId,
           baseSha: entry.baseSha,
+          impact: entry.decision.assessment.impact,
           dedupeKey: `migrate:${input.changeId}:${entry.repository.repositoryId}:${entry.baseSha}`,
         });
         if (result.created) created += 1;

@@ -54,6 +54,18 @@ export interface MigrationInput extends Record<string, unknown> {
   readonly installationId: string;
   readonly changeId: string;
   readonly baseSha: string;
+  /**
+   * How this repository is affected, as classified by `plan-rollout` against
+   * the manifest at `baseSha`.
+   *
+   * Optional in the type because job input arrives as JSON and this workflow
+   * cannot make the compiler check what a row contains. It is not optional in
+   * practice: `loadContext` refuses a job without a usable value rather than
+   * defaulting one, because this classification is the sentence the pull
+   * request opens with, and a default would be us telling a maintainer
+   * something about their repository that nothing computed.
+   */
+  readonly impact?: Impact;
 }
 
 export interface RepositoryContext {

@@ -81,6 +81,8 @@ function repo(n: number, overrides: Partial<CandidateRepository> = {}): Candidat
   return {
     repositoryId: `repo-${n}`,
     installationId: `install-${n}`,
+    forgeRepositoryId: 1000 + n,
+    forgeInstallationId: 5000 + n,
     forgeOwner: "acme",
     forgeName: `widgets-${n}`,
     defaultBranch: "main",
@@ -99,6 +101,7 @@ const MANIFEST = JSON.stringify({
 interface Enqueued {
   repositoryId: string;
   baseSha: string;
+  impact: string;
   dedupeKey: string;
 }
 
@@ -116,6 +119,7 @@ function buildDeps(overrides: Partial<RolloutDeps> = {}): {
       enqueued.push({
         repositoryId: input.repositoryId,
         baseSha: input.baseSha,
+        impact: input.impact,
         dedupeKey: input.dedupeKey,
       });
       return { created: !duplicate };
@@ -338,6 +342,32 @@ describe("enqueuing", () => {
 
     expect(enqueued[0]?.baseSha).toBe("f".repeat(40));
     expect(enqueued[0]?.dedupeKey).toContain("f".repeat(40));
+  });
+
+  it("carries the impact it computed into the job, so nothing recomputes it", async () => {
+    // The impact is the sentence the pull request opens with. It was derived
+    // here, from the manifest at this exact commit; deriving it a second time
+    // in the migration would be a second chance to tell a maintainer something
+    // untrue about their own repository.
+    const { deps, enqueued } = buildDeps();
+
+    await run(deps);
+
+    // `^2.9.0` cannot admit 3.0.0: stuck rather than broken.
+    expect(enqueued[0]?.impact).toBe("stranded");
+  });
+
+  it("marks a repository whose range admits the new version as exposed", async () => {
+    const { deps, enqueued } = buildDeps({
+      readManifest: async () => ({
+        headSha: "a".repeat(40),
+        manifest: JSON.stringify({ name: "widgets", dependencies: { "acme-sdk": ">=2.0.0" } }),
+      }),
+    });
+
+    await run(deps);
+
+    expect(enqueued[0]?.impact).toBe("exposed");
   });
 
   it("does not duplicate work a previous rollout already queued", async () => {
