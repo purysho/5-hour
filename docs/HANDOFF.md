@@ -82,16 +82,39 @@ is as load-bearing as what it does — see the file headers, particularly
 `plan-rollout.ts` on why the canary is small and `wiring.ts` on why nothing is
 defaulted to make a job runnable.
 
-The credential layer is complete in logic and now wired to a real GitHub App
-in `run-worker.ts`. It is still not wired to a real KMS (ADR-0012 governs the
-interim file-backed signer) or to the unix-socket transport.
+The credential layer is complete in logic and now wired to a real GitHub App in
+`run-worker.ts`. `AwsKmsClient` (`src/github/kms-signer.ts`) implements the real
+KMS path, so `GITHUB_SIGNING_KIND=kms` signs through a non-exportable key per
+ADR-0002 §2; the file-backed signer under ADR-0012 remains for local
+development. Not yet wired: the unix-socket transport.
 
-**P3: Test verification sandbox.** The `Verifier` interface is scaffolded
-(gVisor-based) and integrated into `ClaudeMigrationAgent`. Currently returns
-`not-run` to maintain honest reporting until gVisor infrastructure is deployed
-on the worker host. See `docs/SANDBOX_SETUP.md` for deployment steps. Once
-deployed, tests will be reported as `passed`, `failed`, or `error` instead of
-`not-run`, making migrations in PRs honestly verified per ADR-0006.
+The KMS signer takes an optional pre-built client so its failure paths are
+testable without live AWS. That was not cosmetic — signing was previously wired
+straight to a `KMSClient`, and with the branches unreachable a real bug sat
+there unnoticed: the `if (!response.Signature)` throw was inside the `try` that
+wraps transport errors, so "KMS did not return a signature" came back to the
+caller as `KMS signing failed: KMS did not return a signature`, describing a
+network failure that had not happened. Fixed, with a regression test.
+
+**P3: Test verification sandbox.** Not done, and the earlier claim here that it
+was scaffolded and awaiting deployment was wrong in a way worth recording.
+`GVisorVerifier` is wired into `ClaudeMigrationAgent` and reports `not-run`,
+which is honest — but it does not invoke gVisor, and installing `runsc` would
+not change that.
+
+The blocker is the interface, not the host. `Verifier.verify` receives
+`{ repository, diff, changedPaths }`; running a suite needs a checkout with the
+diff applied and dependencies installed, and no caller has one — the workflow
+operates on content fetched through the forge API, never a working tree. So the
+next step is a workspace abstraction in `migrate-repository`, and only then the
+host provisioning in `docs/SANDBOX_SETUP.md`.
+
+What is implemented and tested is the part that does not need a workspace:
+`detectTestCommand` (parses a `package.json`, and rejects the `npm init`
+placeholder so a repository with no suite is not reported as one whose tests
+broke) and `isSandboxAvailable` (probes PATH for `runsc`, so a worker without it
+says so per migration). Outcomes once unblocked are `passed`, `failed`, or
+`no-suite` — the shared `TestOutcome` type has no `error` member.
 
 One remaining honest gap: `downstreamCount` is the tenant's installed
 repository count rather than the number of repositories that declare the
@@ -221,13 +244,26 @@ make a change pass, stop.
    *not* transfer to `dts-surface.ts`, where an approximation would decide
    whether a change is breaking.
 
-5. **Runner sandbox** per ADR-0006. The `Verifier` interface is scaffolded
-   with gVisor architecture and integrated into the agent (P3, done). What
-   remains is infrastructure deployment: install gVisor (`runsc` binary) on the
-   worker host, prepare a Node.js rootfs, and implement the `runInGVisor()`
-   function that orchestrates sandbox lifecycle. See `docs/SANDBOX_SETUP.md` for
-   complete deployment guide. Once deployed, tests will be reported as `passed`,
-   `failed`, or `error` rather than `not-run`.
+5. **Runner sandbox** per ADR-0006. Still open. `GVisorVerifier` is wired in and
+   reports `not-run` truthfully, but nothing executes and gVisor is never
+   invoked. Three things are needed, in this order:
+
+   1. A **workspace** — something that materialises a checkout, applies the
+      diff, installs dependencies, and hands over a path. This is the real
+      blocker: `Verifier.verify` takes a diff and a path list, so verification
+      is not expressible through the current interface no matter how the host
+      is provisioned. It is a change to `migrate-repository`, not to
+      `src/sandbox/`.
+   2. `runsc` and a rootfs on the worker host — `docs/SANDBOX_SETUP.md`.
+      `isSandboxAvailable()` already probes for it.
+   3. An egress-proxied network namespace enforcing `DEFAULT_EGRESS_ALLOWLIST`
+      from `src/sandbox/environment.ts`.
+
+   Note that `buildSandboxEnvironment`/`assertNoSecrets` in
+   `src/sandbox/environment.ts` are complete and thoroughly tested, but are
+   currently referenced *only by tests* — no production path builds a runner
+   environment yet, because no production path starts a runner. They are ready
+   for step 1 to use; they are not evidence that step 1 is done.
 6. **Migration generation.** `ClaudeMigrationAgent` is done (ADR-0013):
    anchored replacements against the Claude API, a blast radius fixed before
    inference, deterministic application, and a diff Driftless renders itself.

@@ -1,79 +1,154 @@
 /**
- * Test verification inside gVisor sandbox.
+ * Test verification inside a gVisor sandbox.
  *
- * Runs the repository's test suite against the migration diff inside a gVisor
- * sandbox, which provides OS-level isolation from the control plane. The result
- * is reported honestly: passed, failed, or timed out.
+ * ── What this does today ─────────────────────────────────────────────────────
  *
- * ── Why gVisor ──────────────────────────────────────────────────────────────
+ * It reports `not-run`, and it names the prerequisite it is missing when it
+ * does. It does not execute a test suite, and it does not invoke gVisor. That
+ * is stated here, in the boot log, and in the pull request body, because a
+ * migration presented as verified when it is not is the one failure mode that
+ * makes every pull request this system opens worthless (ADR-0006).
  *
- * gVisor (open source, CNCF) is a sandbox runtime that intercepts syscalls and
- * runs them in userspace. It provides strong isolation (prevents container
- * breakout, limits resource access) without requiring kernel hypervisor
- * features (KVM, nested virt). Proven at scale by Google Cloud Run, Fly.io,
- * and others. Trade-off: ~20% slower than native execution.
+ * This file previously carried a `runInGVisor` function and a
+ * `detectTestCommand` that returned `null` unconditionally, neither of which
+ * was reachable from anywhere. Scaffolding that reads like an implementation is
+ * worse than an honest gap: it invites the reader to believe verification is
+ * one wiring change away, when in fact the interface cannot express it (below).
  *
- * Alternative would have been Firecracker (faster) but requires host KVM
- * support and is harder to bootstrap a rootfs for. Managed runners are free
- * of infrastructure burden but cost real money per run.
+ * ── Why it cannot simply be finished ─────────────────────────────────────────
+ *
+ * `Verifier.verify` receives `{ repository, diff, changedPaths }`. Running a
+ * test suite needs a checkout — a real directory, with the diff applied and
+ * dependencies installed. None of those are reachable from this signature, and
+ * no caller has one to give: `migrate-repository` works on content fetched
+ * through the forge API, never a working tree.
+ *
+ * So real verification needs, in order:
+ *
+ *   1. A workspace. Something that materialises a checkout, applies the diff,
+ *      and hands over a path. This is the actual blocker, and it is a change
+ *      to the workflow, not to this file.
+ *   2. `runsc` on the worker host, plus a rootfs (docs/SANDBOX_SETUP.md).
+ *   3. An egress-proxied network namespace — `DEFAULT_EGRESS_ALLOWLIST` in
+ *      ./environment.ts is the policy it should enforce.
+ *
+ * The two pieces that do not need a workspace are implemented and tested here:
+ * test-command detection, and the sandbox availability probe. They are the
+ * parts that would otherwise be written in a hurry on the day the workspace
+ * lands.
  */
 
-import { spawn } from "node:child_process";
-import { mkdtemp, rm } from "node:fs/promises";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { access, constants } from "node:fs/promises";
+import { delimiter, join } from "node:path";
 import type { Verifier, VerificationResult } from "../agent/claude-migration-agent.ts";
 import type { RepositoryContext } from "../workflows/migrate-repository.ts";
 
-const DEFAULT_TIMEOUT_MS = 300_000; // 5 minutes
+/** Five minutes. A suite slower than this is not one we can gate a PR on. */
+export const DEFAULT_TIMEOUT_MS = 300_000;
 
 /**
- * Detects the test command for the repository by looking for common indicators.
- * Returns null if no test script is found (in which case verification is "not-run").
- *
- * Tries to find test commands in this order:
- * 1. package.json "test" script
- * 2. Makefile `test` target
- * 3. shell scripts (test.sh, runtests.sh, etc.)
+ * `npm init` writes this. Treating it as a test suite would guarantee a
+ * `failed` verdict on every repository that never replaced it — which reads,
+ * in a pull request body, as "your tests broke" rather than "you have none".
  */
-export function detectTestCommand(repository: RepositoryContext): string | null {
-  // The repository is loaded but we don't have the file contents here.
-  // In practice, this would be called with the loaded manifest.
-  // For now, return null and let callers pass it explicitly.
-  return null;
+const NPM_PLACEHOLDER_TEST = /no test specified/i;
+
+/**
+ * The test command declared by a `package.json`, or null if it has none worth
+ * running.
+ *
+ * Takes the manifest source rather than a `RepositoryContext`, because the
+ * context does not carry file contents — the previous signature could not have
+ * been implemented, which is why it never was.
+ */
+export function detectTestCommand(manifestSource: string): string | null {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(manifestSource);
+  } catch {
+    // A manifest we cannot parse is not a verification failure. The migration
+    // is judged by policy either way, and `no-suite` is the honest report.
+    return null;
+  }
+
+  if (typeof parsed !== "object" || parsed === null) return null;
+  const scripts = (parsed as { scripts?: unknown }).scripts;
+  if (typeof scripts !== "object" || scripts === null) return null;
+
+  const test = (scripts as { test?: unknown }).test;
+  if (typeof test !== "string") return null;
+
+  const trimmed = test.trim();
+  if (trimmed.length === 0) return null;
+  if (NPM_PLACEHOLDER_TEST.test(trimmed)) return null;
+
+  return trimmed;
 }
 
 /**
- * Runs a test command inside a gVisor sandbox.
+ * Whether `runsc` — the gVisor runtime — is on this host.
  *
- * Spawns a gVisor container with a minimal rootfs, copies the migrated
- * repository into it, installs dependencies, and runs the test command.
+ * Checked rather than assumed, so a worker deployed without it says so per
+ * migration instead of failing test runs for a reason that has nothing to do
+ * with the migration.
+ */
+export async function isSandboxAvailable(
+  options: {
+    path?: string | undefined;
+    canExecute?: (candidate: string) => Promise<boolean>;
+  } = {},
+): Promise<boolean> {
+  const path = options.path ?? process.env["PATH"] ?? "";
+  const canExecute =
+    options.canExecute ??
+    (async (candidate: string) => {
+      try {
+        await access(candidate, constants.X_OK);
+        return true;
+      } catch {
+        return false;
+      }
+    });
+
+  for (const directory of path.split(delimiter)) {
+    if (directory.length === 0) continue;
+    if (await canExecute(join(directory, "runsc"))) return true;
+  }
+  return false;
+}
+
+export interface GVisorVerifierOptions {
+  /**
+   * Test command to run once a workspace exists. Recorded and reported; it is
+   * not executed today.
+   */
+  readonly testCommand?: string | undefined;
+  /** Timeout in milliseconds. Default five minutes. */
+  readonly timeoutMs?: number | undefined;
+  readonly log?: ((event: string, detail: Record<string, unknown>) => void) | undefined;
+  /** Overridden in tests. Defaults to probing PATH for `runsc`. */
+  readonly sandboxAvailable?: (() => Promise<boolean>) | undefined;
+}
+
+/**
+ * Reports `not-run`, and logs which prerequisite is missing.
  *
- * Returns the result: passed/failed/not-run along with the command used
- * and duration.
- *
- * Not yet implemented: this requires gVisor to be installed on the host,
- * which is a prerequisite for the worker environment. For now, returns
- * "not-run" to maintain honest reporting (ADR-0006).
+ * Deliberately still a distinct type from `UNVERIFIED` rather than a copy of
+ * it: this one says *why* per migration, which is what turns "verification is
+ * off" from a fact buried in a boot log into something visible in the record
+ * of an individual pull request.
  */
 export class GVisorVerifier implements Verifier {
   readonly #timeoutMs: number;
   readonly #testCommand: string | undefined;
   readonly #log: (event: string, detail: Record<string, unknown>) => void;
+  readonly #sandboxAvailable: () => Promise<boolean>;
 
-  constructor(options?: {
-    /**
-     * Optional test command to run. If not provided, detectTestCommand is used
-     * and verification returns "not-run" if no standard script is found.
-     */
-    testCommand?: string;
-    /** Timeout in milliseconds. Default 5 minutes. */
-    timeoutMs?: number;
-    log?: (event: string, detail: Record<string, unknown>) => void;
-  }) {
-    this.#testCommand = options?.testCommand;
-    this.#timeoutMs = options?.timeoutMs ?? DEFAULT_TIMEOUT_MS;
-    this.#log = options?.log ?? (() => {});
+  constructor(options: GVisorVerifierOptions = {}) {
+    this.#testCommand = options.testCommand;
+    this.#timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
+    this.#log = options.log ?? (() => {});
+    this.#sandboxAvailable = options.sandboxAvailable ?? (() => isSandboxAvailable());
   }
 
   async verify(input: {
@@ -81,85 +156,31 @@ export class GVisorVerifier implements Verifier {
     diff: string;
     changedPaths: readonly string[];
   }): Promise<VerificationResult> {
-    const startTime = Date.now();
-
-    try {
-      // TODO(P3): Implement gVisor sandbox setup
-      // For now, return "not-run" to match current behavior while placeholder is built
-      // This ensures migrations report honestly that tests were not run
-      this.#log("sandbox.not_implemented", {
-        reason: "gVisor sandbox infrastructure not yet deployed",
-        repository: input.repository.forgeOwner,
-        changedPaths: input.changedPaths,
-        configuredTimeout: this.#timeoutMs,
-      });
-
-      // When implemented, would call runInGVisor here:
-      // const result = await runInGVisor({
-      //   rootfs: "/opt/driftless/rootfs",
-      //   repository: createTemporaryClone(input),
-      //   command: this.#testCommand ?? detectTestCommand(...),
-      //   timeoutMs: this.#timeoutMs,
-      // });
-
-      return {
-        tests: "not-run",
-        command: this.#testCommand ?? null,
-      };
-    } catch (error) {
-      this.#log("sandbox.verification_error", {
+    // The probe is the only thing here that can throw, and an infrastructure
+    // problem must not burn a migration's retry budget — so a failure to
+    // determine availability is reported as unavailable, not raised.
+    const sandboxReady = await this.#sandboxAvailable().catch((error: unknown) => {
+      this.#log("sandbox.probe_failed", {
         error: error instanceof Error ? error.message : String(error),
       });
-      // On error, report not-run rather than failing the migration.
-      // An infrastructure problem should not burn retry budget.
-      return {
-        tests: "not-run",
-        command: this.#testCommand ?? null,
-      };
-    }
-  }
-}
+      return false;
+    });
 
-/**
- * Spawns a gVisor container with the given rootfs, mounts the repository,
- * and runs the test command.
- *
- * @returns Exit code (0 = passed, non-zero = failed), stdout, stderr
- */
-async function runInGVisor(input: {
-  rootfs: string;
-  repository: string;
-  command: string;
-  timeoutMs: number;
-}): Promise<{
-  exitCode: number;
-  stdout: string;
-  stderr: string;
-  durationSeconds: number;
-}> {
-  // Placeholder: would use runsc or crun-gvisor here
-  // Actual implementation would:
-  // 1. Create a bundle directory for gVisor (OCI image format)
-  // 2. Run: runsc run --rootfs=<rootfs> --bundle=<bundle> <container-id>
-  // 3. Execute test command inside
-  // 4. Capture output and exit code
-  // 5. Clean up
+    this.#log("sandbox.not_run", {
+      // Both are reported, because they are independent and a deployment can
+      // fix one without the other. `workspace` is the blocker that outlives
+      // any host provisioning.
+      missing: sandboxReady ? ["workspace"] : ["workspace", "runsc"],
+      repository: `${input.repository.forgeOwner}/${input.repository.forgeName}`,
+      changedPaths: input.changedPaths.length,
+      configuredTimeoutMs: this.#timeoutMs,
+      configuredTestCommand: this.#testCommand ?? null,
+    });
 
-  const startTime = Date.now();
-  const tempDir = await mkdtemp(join(tmpdir(), "gvisor-"));
-
-  try {
-    // Temporary stub: just return not-run result
-    // This is the honest position while the infrastructure is being set up
-    const durationSeconds = (Date.now() - startTime) / 1000;
-
-    return {
-      exitCode: 0,
-      stdout: "",
-      stderr: "gVisor sandbox implementation pending",
-      durationSeconds,
-    };
-  } finally {
-    await rm(tempDir, { recursive: true, force: true });
+    // `command: null`, not the configured command. The field means "the
+    // command we ran", and it is rendered as such in the pull request body;
+    // naming a command beside `not-run` would imply an attempt that did not
+    // happen.
+    return { tests: "not-run", command: null };
   }
 }
