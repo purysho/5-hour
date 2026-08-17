@@ -164,6 +164,131 @@ describe("suspension is reversible", () => {
   });
 });
 
+describe("repositories granted", () => {
+  it("records the repositories a customer just granted", async () => {
+    // The row this writes is the only thing that makes a repository visible to
+    // the rest of the pipeline. Without it there is nothing to migrate, which
+    // is exactly the state the system was in before this event was handled.
+    const fixture = await seedProvider(`wh-add-${Date.now()}`);
+    const installationId = await forgeIdFor(fixture);
+
+    const event: ForgeEvent = {
+      type: "repositories.added",
+      installationId,
+      repositories: [
+        { owner: "acme", name: "new-service", forgeRepositoryId: 987, isPrivate: true },
+      ],
+    };
+
+    const result = await applyForgeEvent(event, deps());
+    expect(result.applied).toBe(true);
+
+    const rows = await db.withTenant(fixture.providerId, async (client) => {
+      const { rows } = await client.query<{ forge_repository_id: string; is_private: boolean }>(
+        "SELECT forge_repository_id, is_private FROM repository WHERE forge_name = $1",
+        ["new-service"],
+      );
+      return rows;
+    });
+
+    expect(rows).toHaveLength(1);
+    // ADR-0002 scopes a token by numeric id. A row without one is a repository
+    // we can name and cannot act on.
+    expect(Number(rows[0]!.forge_repository_id)).toBe(987);
+  });
+
+  it("does not create a second row when the grant is replayed", async () => {
+    // Webhook deliveries repeat. Two rows for one repository would mean two
+    // candidate entries and, downstream, two pull requests.
+    const fixture = await seedProvider(`wh-add-replay-${Date.now()}`);
+    const installationId = await forgeIdFor(fixture);
+    const event: ForgeEvent = {
+      type: "repositories.added",
+      installationId,
+      repositories: [{ owner: "acme", name: "svc", forgeRepositoryId: 1, isPrivate: false }],
+    };
+
+    await applyForgeEvent(event, deps());
+    await applyForgeEvent(event, deps());
+
+    const count = await db.withTenant(fixture.providerId, async (client) => {
+      const { rows } = await client.query<{ count: string }>(
+        "SELECT count(*)::text AS count FROM repository WHERE forge_name = $1",
+        ["svc"],
+      );
+      return Number(rows[0]!.count);
+    });
+    expect(count).toBe(1);
+  });
+
+  it("un-archives a repository the customer re-grants", async () => {
+    // The customer re-inviting us must not require a support ticket to take
+    // effect. The audit trail of the first grant stays where it was.
+    const fixture = await seedProvider(`wh-regrant-${Date.now()}`);
+    const installationId = await forgeIdFor(fixture);
+
+    await applyForgeEvent(
+      {
+        type: "repositories.removed",
+        installationId,
+        repositories: [{ owner: `${fixture.slug}-consumer`, name: "widgets" }],
+      },
+      deps(),
+    );
+    await applyForgeEvent(
+      {
+        type: "repositories.added",
+        installationId,
+        repositories: [
+          {
+            owner: `${fixture.slug}-consumer`,
+            name: "widgets",
+            forgeRepositoryId: 4242,
+            isPrivate: true,
+          },
+        ],
+      },
+      deps(),
+    );
+
+    const archivedAt = await db.withTenant(fixture.providerId, async (client) => {
+      const { rows } = await client.query<{ archived_at: string | null }>(
+        "SELECT archived_at FROM repository WHERE id = $1",
+        [fixture.repositoryId],
+      );
+      return rows[0]!.archived_at;
+    });
+    expect(archivedAt).toBeNull();
+  });
+
+  it("does not record repositories for an installation belonging to someone else", async () => {
+    // The tenant comes from resolving the installation, never from the
+    // payload. An event naming another provider's installation must not write
+    // into this one.
+    const mine = await seedProvider(`wh-add-mine-${Date.now()}`);
+    const theirs = await seedProvider(`wh-add-theirs-${Date.now()}`);
+    const theirInstallation = await forgeIdFor(theirs);
+
+    await applyForgeEvent(
+      {
+        type: "repositories.added",
+        installationId: theirInstallation,
+        repositories: [{ owner: "acme", name: "leaked", forgeRepositoryId: 55, isPrivate: true }],
+      },
+      deps(),
+    );
+
+    const count = await db.withTenant(mine.providerId, async (client) => {
+      const { rows } = await client.query<{ count: string }>(
+        "SELECT count(*)::text AS count FROM repository WHERE forge_name = $1",
+        ["leaked"],
+      );
+      return Number(rows[0]!.count);
+    });
+    expect(count).toBe(0);
+  });
+});
+
 describe("repositories withdrawn", () => {
   it("archives rather than deletes", async () => {
     // Deleting would orphan the outbound_write records that prove what we did

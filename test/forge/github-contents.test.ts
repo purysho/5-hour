@@ -141,6 +141,54 @@ describe("snapshotting a repository", () => {
   });
 });
 
+describe("describing a repository", () => {
+  it("reports the branch the repository actually defaults to", async () => {
+    // The installation webhook never says. Assuming `main` on a repository
+    // that uses `master` produces a repository that looks like it has no
+    // manifest — a skip nobody investigates.
+    const { http } = stubHttp({
+      "GET /repos/acme/widgets": json(200, {
+        default_branch: "master",
+        stargazers_count: 12,
+        fork: false,
+        archived: false,
+      }),
+    });
+    const client = new GitHubContentClient({ http });
+
+    await expect(client.describe(token(), COORD)).resolves.toEqual({
+      defaultBranch: "master",
+      stars: 12,
+      fork: false,
+      archived: false,
+    });
+  });
+
+  it("reports a fork, which is never the meaningful target", async () => {
+    const { http } = stubHttp({
+      "GET /repos/acme/widgets": json(200, { default_branch: "main", fork: true }),
+    });
+    const client = new GitHubContentClient({ http });
+
+    const described = await client.describe(token(), COORD);
+    expect(described?.fork).toBe(true);
+    // Absent rather than zero: we did not learn the star count.
+    expect(described?.stars).toBeNull();
+  });
+
+  it("returns null for a repository we cannot see", async () => {
+    const { http } = stubHttp({ "GET /repos/acme/widgets": json(404, { message: "Not Found" }) });
+    const client = new GitHubContentClient({ http });
+    await expect(client.describe(token(), COORD)).resolves.toBeNull();
+  });
+
+  it("returns null rather than inventing a default branch", async () => {
+    const { http } = stubHttp({ "GET /repos/acme/widgets": json(200, { stargazers_count: 3 }) });
+    const client = new GitHubContentClient({ http });
+    await expect(client.describe(token(), COORD)).resolves.toBeNull();
+  });
+});
+
 describe("reading a blob", () => {
   it("decodes base64 rather than trusting a utf-8 round trip", async () => {
     const { http } = stubHttp({ "GET /repos/acme/widgets/git/blobs/": blob("const x = 1;\n") });

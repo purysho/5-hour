@@ -43,13 +43,31 @@ const json = (status: number, value: unknown): ForgeHttpResponse => ({
   body: JSON.stringify(value),
 });
 
+/**
+ * Exact match first, then longest prefix.
+ *
+ * Order matters here: `/repos/o/n` is a real route (describe) and a prefix of
+ * every other route on the repository. A first-match-wins router would answer
+ * the tree read with the repository description and quietly pass a test that
+ * proves nothing.
+ */
 function stubHttp(routes: Record<string, ForgeHttpResponse>): ForgeHttpClient {
   return {
     async request(method, url) {
       const path = url.replace("https://api.github.com", "");
-      for (const [pattern, response] of Object.entries(routes)) {
-        const [routeMethod, routePath] = pattern.split(" ");
-        if (routeMethod === method && path.startsWith(routePath as string)) return response;
+      const candidates = Object.entries(routes)
+        .map(([pattern, response]) => {
+          const [routeMethod, routePath = ""] = pattern.split(" ");
+          return { routeMethod, routePath, response };
+        })
+        .filter((route) => route.routeMethod === method)
+        .sort((a, b) => b.routePath.length - a.routePath.length);
+
+      for (const route of candidates) {
+        if (path === route.routePath) return route.response;
+      }
+      for (const route of candidates) {
+        if (path.startsWith(route.routePath)) return route.response;
       }
       return { status: 404, body: "{}" };
     },
@@ -346,6 +364,104 @@ describe("rollout dependencies", () => {
         forgeRepositoryId: 555,
         forgeInstallationId: 1,
         forgeOwner: "acme",
+        forgeName: "widgets",
+        defaultBranch: "main",
+        archived: false,
+        fork: false,
+      },
+      tenant.providerId,
+    );
+
+    expect(manifest).toBeNull();
+  });
+
+  it("reads the branch the repository actually defaults to, not the one we assumed", async () => {
+    // The seeded row says `main` because that is the schema default and the
+    // webhook never said otherwise. This repository is on `master`. Reading
+    // the assumed branch would produce "no manifest" — a skip nobody
+    // investigates — on a repository that has one.
+    await setForgeId(555);
+    const owner = `${tenant.slug}-consumer`;
+    const base = `/repos/${owner}/widgets`;
+    const deps = createRolloutDeps({
+      db,
+      app: stubApp(),
+      contents: new GitHubContentClient({
+        http: stubHttp({
+          [`GET ${base}`]: json(200, {
+            default_branch: "master",
+            stargazers_count: 7,
+            fork: false,
+            archived: false,
+          }),
+          [`GET ${base}/commits/master`]: json(200, {
+            sha: "a".repeat(40),
+            commit: { tree: { sha: "tree-1" } },
+          }),
+          [`GET ${base}/git/trees/`]: json(200, {
+            truncated: false,
+            tree: [{ path: "package.json", sha: "d".repeat(40), type: "blob", size: 40 }],
+          }),
+          [`GET ${base}/git/blobs/`]: json(200, {
+            encoding: "base64",
+            size: 40,
+            content: Buffer.from('{"name":"w"}', "utf8").toString("base64"),
+          }),
+        }),
+      }),
+    });
+
+    const manifest = await deps.readManifest(
+      {
+        repositoryId: tenant.repositoryId,
+        installationId: tenant.installationId,
+        forgeRepositoryId: 555,
+        forgeInstallationId: 1,
+        forgeOwner: owner,
+        forgeName: "widgets",
+        defaultBranch: "main",
+        archived: false,
+        fork: false,
+      },
+      tenant.providerId,
+    );
+
+    expect(manifest?.manifest).toBe('{"name":"w"}');
+
+    // And the correction is cached, so the next rollout does not rediscover it.
+    const row = await db.withTenant(tenant.providerId, async (client) => {
+      const { rows } = await client.query<{ default_branch: string; stars: number | null }>(
+        "SELECT default_branch, stars FROM repository WHERE id = $1",
+        [tenant.repositoryId],
+      );
+      return rows[0]!;
+    });
+    expect(row.default_branch).toBe("master");
+    expect(row.stars).toBe(7);
+  });
+
+  it("does not spend a tree read on a fork", async () => {
+    // The upstream is the meaningful target. The row said otherwise because
+    // nothing had described it yet.
+    await setForgeId(555);
+    const owner = `${tenant.slug}-consumer`;
+    const deps = createRolloutDeps({
+      db,
+      app: stubApp(),
+      contents: new GitHubContentClient({
+        http: stubHttp({
+          [`GET /repos/${owner}/widgets`]: json(200, { default_branch: "main", fork: true }),
+        }),
+      }),
+    });
+
+    const manifest = await deps.readManifest(
+      {
+        repositoryId: tenant.repositoryId,
+        installationId: tenant.installationId,
+        forgeRepositoryId: 555,
+        forgeInstallationId: 1,
+        forgeOwner: owner,
         forgeName: "widgets",
         defaultBranch: "main",
         archived: false,

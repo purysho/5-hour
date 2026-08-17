@@ -60,6 +60,14 @@ export interface RepositoryFile {
   readonly content: string;
 }
 
+/** What the forge says about a repository, as opposed to what we assumed. */
+export interface RepositoryDescription {
+  readonly defaultBranch: string;
+  readonly stars: number | null;
+  readonly fork: boolean;
+  readonly archived: boolean;
+}
+
 export interface ContentClientOptions {
   readonly http: ForgeHttpClient;
   readonly baseUrl?: string;
@@ -149,6 +157,48 @@ export class GitHubContentClient {
     }
 
     return { commitSha, treeSha, entries, truncated: parsed.truncated === true };
+  }
+
+  /**
+   * A repository's shape: default branch, popularity, whether it is a fork.
+   *
+   * None of this arrives on the installation webhook, and none of it is safe
+   * to assume. A repository whose default branch is `master` and whom we
+   * assumed was on `main` is one we silently never manage to read — it looks
+   * exactly like a repository with no manifest, which is a skip nobody
+   * investigates. So it is asked for, with a credential, rather than guessed.
+   */
+  async describe(
+    token: ScopedToken,
+    coord: RepositoryCoordinate,
+  ): Promise<RepositoryDescription | null> {
+    assertCoordinate(coord);
+    const auth = ScopedToken.revealForAuthorisedUse(token, "github-api-request");
+
+    const response = await this.#send("GET", this.#repoUrl(coord), auth);
+    if (response.status === 404) return null;
+    if (response.status !== 200) {
+      throw new ForgeError(
+        `Describing ${coord.owner}/${coord.name} returned ${response.status}: ${response.body}`,
+        response.status,
+      );
+    }
+
+    const repo = parse<{
+      default_branch?: string;
+      stargazers_count?: number;
+      fork?: boolean;
+      archived?: boolean;
+    }>(response.body);
+
+    if (typeof repo.default_branch !== "string" || repo.default_branch === "") return null;
+
+    return {
+      defaultBranch: repo.default_branch,
+      stars: typeof repo.stargazers_count === "number" ? repo.stargazers_count : null,
+      fork: repo.fork === true,
+      archived: repo.archived === true,
+    };
   }
 
   /**

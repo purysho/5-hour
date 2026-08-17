@@ -25,7 +25,7 @@
  */
 
 import type { TenantClient } from "../db/client.ts";
-import type { ForgeEvent, RepositoryRef } from "./webhook.ts";
+import type { AddedRepository, ForgeEvent, RepositoryRef } from "./webhook.ts";
 
 export interface ApplyResult {
   readonly applied: boolean;
@@ -68,6 +68,8 @@ export async function applyForgeEvent(
         return revoke(client, event.installationId, "suspended");
       case "installation.unsuspended":
         return unsuspend(client, event.installationId);
+      case "repositories.added":
+        return addRepositories(client, providerId, event.installationId, event.repositories);
       case "repositories.removed":
         return removeRepositories(client, event.installationId, event.repositories);
       case "pull_request.closed":
@@ -123,6 +125,64 @@ async function unsuspend(
     applied: (rowCount ?? 0) > 0,
     detail: "installation unsuspended",
     auditAction: "installation.unsuspended",
+  };
+}
+
+/**
+ * Records repositories a customer has just granted us.
+ *
+ * The row this writes is the only thing that makes a repository visible to the
+ * rest of the pipeline, so what it does *not* write matters as much as what it
+ * does. The payload carries no default branch and no star count; those are
+ * left at their defaults for the worker to learn with a credential, because a
+ * guessed default branch produces a repository we silently never manage to
+ * read.
+ *
+ * Re-granting a previously withdrawn repository clears `archived_at`. That is
+ * the customer re-inviting us, and it must not require a support ticket to
+ * take effect — while the audit trail of what we did during the first grant
+ * stays exactly where it was.
+ */
+async function addRepositories(
+  client: TenantClient,
+  providerId: string,
+  forgeInstallationId: number,
+  repositories: readonly AddedRepository[],
+): Promise<ApplyResult> {
+  if (repositories.length === 0) {
+    return { applied: false, detail: "no repositories in grant", auditAction: null };
+  }
+
+  const { rows } = await client.query<{ id: string }>(
+    `INSERT INTO repository
+       (provider_id, installation_id, forge, forge_owner, forge_name,
+        forge_repository_id, is_private)
+     SELECT $1, i.id, 'github', t.owner, t.name, t.forge_id, t.is_private
+       FROM installation i,
+            unnest($3::text[], $4::text[], $5::bigint[], $6::boolean[])
+              AS t(owner, name, forge_id, is_private)
+      WHERE i.forge_installation_id = $2
+        AND i.provider_id = $1
+     ON CONFLICT (provider_id, forge, forge_owner, forge_name) DO UPDATE
+        SET forge_repository_id = EXCLUDED.forge_repository_id,
+            installation_id     = EXCLUDED.installation_id,
+            is_private          = EXCLUDED.is_private,
+            archived_at         = NULL
+     RETURNING id`,
+    [
+      providerId,
+      forgeInstallationId,
+      repositories.map((repository) => repository.owner),
+      repositories.map((repository) => repository.name),
+      repositories.map((repository) => repository.forgeRepositoryId),
+      repositories.map((repository) => repository.isPrivate),
+    ],
+  );
+
+  return {
+    applied: rows.length > 0,
+    detail: `${rows.length} repository(ies) recorded from grant`,
+    auditAction: "repositories.added",
   };
 }
 

@@ -35,7 +35,11 @@ import type { AuditSink, GitHubApp } from "../github/app.ts";
 import { postgresAuditSink } from "../audit/sink.ts";
 import { PermanentFailure } from "../workflow/types.ts";
 import { untrusted, type UntrustedContent } from "../agent/untrusted.ts";
-import { GitHubContentClient, selectSourcePaths } from "../forge/github-contents.ts";
+import {
+  GitHubContentClient,
+  selectSourcePaths,
+  type RepositoryDescription,
+} from "../forge/github-contents.ts";
 import type { Impact } from "../discover/affected.ts";
 import type { Corroboration } from "../detect/corroborate.ts";
 import type {
@@ -323,6 +327,7 @@ interface CandidateRow {
   default_branch: string;
   archived_at: Date | null;
   stars: number | null;
+  is_fork: boolean;
 }
 
 /** Manifest filenames, in the order a repository is asked for them. */
@@ -370,7 +375,7 @@ export function createRolloutDeps(deps: WiringDeps): RolloutDeps {
       // that it uses anything.
       const { rows } = await client.query<CandidateRow>(
         `SELECT r.id, r.installation_id, r.forge_repository_id, r.forge_owner,
-                r.forge_name, r.default_branch, r.archived_at, r.stars,
+                r.forge_name, r.default_branch, r.archived_at, r.stars, r.is_fork,
                 i.forge_installation_id
            FROM repository r
            JOIN installation i ON i.id = r.installation_id
@@ -389,11 +394,11 @@ export function createRolloutDeps(deps: WiringDeps): RolloutDeps {
         forgeName: row.forge_name,
         defaultBranch: row.default_branch,
         archived: false,
-        // Forks are not distinguished in the schema yet. Reporting every
-        // repository as a non-fork is a claim; `decideTarget` would skip forks
-        // if it knew, and it does not, so this is recorded as a known gap
-        // rather than hidden behind a plausible default.
-        fork: false,
+        // From the forge, refreshed on each rollout that reads this
+        // repository (migration 009). Until then it is the default, which is
+        // why `readManifest` re-checks it against a live description before
+        // spending a tree read.
+        fork: row.is_fork,
         ...(row.stars !== null && { stars: row.stars }),
       }));
     },
@@ -420,7 +425,26 @@ export function createRolloutDeps(deps: WiringDeps): RolloutDeps {
           auditFor(deps.db, providerId),
         );
 
-        const snapshot = await deps.contents.snapshot(token, coord, repository.defaultBranch);
+        // Ask the forge what this repository actually looks like before
+        // reading it. The webhook never said which branch is the default, and
+        // reading the wrong one produces a repository that looks like it has
+        // no manifest — a skip nobody investigates.
+        const described = await deps.contents.describe(token, coord);
+        if (!described) return null;
+        await refreshRepositoryShape(deps.db, providerId, repository.repositoryId, described);
+
+        if (described.archived || described.fork) {
+          // Both are `decideTarget`'s decision, but it works from the row, and
+          // the row was stale until a moment ago. Stopping here saves a tree
+          // read on a repository that was never going to be targeted.
+          log("rollout.repository_skipped", {
+            repository: `${coord.owner}/${coord.name}`,
+            reason: described.archived ? "archived" : "fork",
+          });
+          return null;
+        }
+
+        const snapshot = await deps.contents.snapshot(token, coord, described.defaultBranch);
         if (!snapshot) return null;
 
         const manifest = await deps.contents.readPath(
@@ -491,6 +515,35 @@ export function createRolloutDeps(deps: WiringDeps): RolloutDeps {
       });
     },
   };
+}
+
+/**
+ * Caches what the forge said about a repository.
+ *
+ * Best-effort on purpose: a failure to write the cache must not cost the
+ * rollout the manifest it just successfully read. The values are a performance
+ * and ordering concern, and the authoritative copy was in hand a line ago.
+ */
+async function refreshRepositoryShape(
+  db: Database,
+  providerId: string,
+  repositoryId: string,
+  described: RepositoryDescription,
+): Promise<void> {
+  try {
+    await db.withTenant(providerId, (client) =>
+      client.query(
+        `UPDATE repository
+            SET default_branch = $2, stars = $3, is_fork = $4,
+                archived_at = CASE WHEN $5 THEN COALESCE(archived_at, now()) ELSE archived_at END,
+                described_at = now()
+          WHERE id = $1`,
+        [repositoryId, described.defaultBranch, described.stars, described.fork, described.archived],
+      ),
+    );
+  } catch {
+    // Deliberately swallowed. See above.
+  }
 }
 
 // ── detect-changes ──────────────────────────────────────────────────────────

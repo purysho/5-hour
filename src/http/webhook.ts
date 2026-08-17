@@ -76,6 +76,11 @@ export type ForgeEvent =
       readonly repositories: readonly RepositoryRef[];
     }
   | {
+      readonly type: "repositories.added";
+      readonly installationId: number;
+      readonly repositories: readonly AddedRepository[];
+    }
+  | {
       readonly type: "pull_request.closed";
       readonly installationId: number;
       readonly repository: RepositoryRef;
@@ -86,6 +91,21 @@ export type ForgeEvent =
 export interface RepositoryRef {
   readonly owner: string;
   readonly name: string;
+}
+
+/**
+ * A repository we have just been granted access to.
+ *
+ * Carries the numeric forge id, which is the field that matters: ADR-0002
+ * scopes every token by it, so a repository recorded without one is a
+ * repository we can name and cannot act on. The payload does not include the
+ * default branch or the star count, and this deliberately does not invent
+ * them — the worker learns a repository's shape the first time it reads it,
+ * with a credential, rather than the webhook guessing.
+ */
+export interface AddedRepository extends RepositoryRef {
+  readonly forgeRepositoryId: number;
+  readonly isPrivate: boolean;
 }
 
 export interface WebhookDeps {
@@ -197,6 +217,16 @@ function interpret(eventType: string, payload: unknown): WebhookOutcome {
           kind: "accepted",
           event: { type: "installation.unsuspended", installationId },
         };
+      case "created": {
+        // The first event of a customer's life. Without it there is no
+        // repository row, and every later stage has nothing to act on.
+        const repositories = readAddedRepositories(body["repositories"]);
+        if (repositories === null) return { kind: "rejected", reason: "unexpected-shape" };
+        return {
+          kind: "accepted",
+          event: { type: "repositories.added", installationId, repositories },
+        };
+      }
       default:
         return { kind: "ignored", reason: `installation.${action ?? "unknown"}` };
     }
@@ -204,6 +234,14 @@ function interpret(eventType: string, payload: unknown): WebhookOutcome {
 
   if (eventType === "installation_repositories") {
     if (installationId === null) return { kind: "rejected", reason: "unexpected-shape" };
+    if (action === "added") {
+      const repositories = readAddedRepositories(body["repositories_added"]);
+      if (repositories === null) return { kind: "rejected", reason: "unexpected-shape" };
+      return {
+        kind: "accepted",
+        event: { type: "repositories.added", installationId, repositories },
+      };
+    }
     if (action !== "removed") {
       return { kind: "ignored", reason: `installation_repositories.${action ?? "unknown"}` };
     }
@@ -285,6 +323,36 @@ function readRepository(value: unknown): RepositoryRef | null {
     };
   }
   return null;
+}
+
+/**
+ * Repositories being granted, with their numeric ids.
+ *
+ * An entry without a usable id is dropped rather than invalidating the batch —
+ * the opposite of `readRepositoryList`, and for the opposite reason. There,
+ * partially applying a *removal* would leave us acting on repositories the
+ * customer withdrew, so all-or-nothing is the safe direction. Here, dropping
+ * one entry costs that repository its migrations and grants nothing extra.
+ */
+function readAddedRepositories(value: unknown): readonly AddedRepository[] | null {
+  if (!Array.isArray(value)) return null;
+  const added: AddedRepository[] = [];
+  for (const entry of value) {
+    const ref = readRepository(entry);
+    if (!ref) continue;
+    const record = entry as Record<string, unknown>;
+    const id = record["id"];
+    if (typeof id !== "number" || !Number.isSafeInteger(id) || id <= 0) continue;
+    added.push({
+      ...ref,
+      forgeRepositoryId: id,
+      // Absent means public on some payload shapes. Defaulting to private is
+      // the safe direction: it is only used for our own reporting, and
+      // over-reporting privacy leaks nothing.
+      isPrivate: record["private"] !== false,
+    });
+  }
+  return added;
 }
 
 function readRepositoryList(value: unknown): readonly RepositoryRef[] | null {

@@ -379,3 +379,90 @@ describe("authenticated but malformed", () => {
     expect(outcome.kind).toBe("ignored");
   });
 });
+
+describe("repositories granted", () => {
+  it("accepts the grant that first tells us a repository exists", async () => {
+    // Nothing else in the system creates a repository row. Before this event
+    // was handled, a customer could install the app and the pipeline would
+    // have nothing at all to act on.
+    const outcome = await handleWebhook(
+      deliver(
+        {
+          action: "added",
+          installation: INSTALLATION,
+          repositories_added: [
+            { id: 777, full_name: "acme/widgets", private: false },
+          ],
+        },
+        { event: "installation_repositories" },
+      ),
+      deps(),
+    );
+
+    expect(outcome.kind).toBe("accepted");
+    expect(outcome.kind === "accepted" && outcome.event).toEqual({
+      type: "repositories.added",
+      installationId: 12345,
+      repositories: [
+        { owner: "acme", name: "widgets", forgeRepositoryId: 777, isPrivate: false },
+      ],
+    });
+  });
+
+  it("reads the repositories carried on a fresh installation", async () => {
+    const outcome = await handleWebhook(
+      deliver({
+        action: "created",
+        installation: INSTALLATION,
+        repositories: [{ id: 1, full_name: "acme/one", private: true }],
+      }),
+      deps(),
+    );
+
+    expect(outcome.kind === "accepted" && outcome.event.type).toBe("repositories.added");
+  });
+
+  it("drops an entry with no numeric id rather than the whole grant", async () => {
+    // The opposite of a withdrawal, where one bad entry invalidates the batch.
+    // Dropping one entry here costs that repository its migrations; dropping
+    // the batch costs every other repository in the same grant.
+    const outcome = await handleWebhook(
+      deliver(
+        {
+          action: "added",
+          installation: INSTALLATION,
+          repositories_added: [
+            { full_name: "acme/no-id" },
+            { id: 2, full_name: "acme/fine", private: false },
+          ],
+        },
+        { event: "installation_repositories" },
+      ),
+      deps(),
+    );
+
+    expect(outcome.kind === "accepted" && outcome.event).toMatchObject({
+      repositories: [{ name: "fine", forgeRepositoryId: 2 }],
+    });
+  });
+
+  it("treats missing visibility as private", async () => {
+    // Over-reporting privacy leaks nothing; under-reporting it describes a
+    // customer's private repository as public in our own records.
+    const outcome = await handleWebhook(
+      deliver(
+        {
+          action: "added",
+          installation: INSTALLATION,
+          repositories_added: [{ id: 3, full_name: "acme/unknown-visibility" }],
+        },
+        { event: "installation_repositories" },
+      ),
+      deps(),
+    );
+
+    expect(outcome.kind === "accepted" && outcome.event).toMatchObject({
+      repositories: [{ isPrivate: true }],
+    });
+  });
+});
