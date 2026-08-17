@@ -181,6 +181,20 @@ export interface ApplyOptions {
 export interface AppliedPlan {
   readonly diff: string;
   readonly changedPaths: readonly string[];
+  /**
+   * The applied contents, carried rather than discarded.
+   *
+   * The diff above is a *description* of this transformation (see the header
+   * of `unified-diff.ts`). Whatever eventually writes to the forge must write
+   * these bytes, never its own reading of that description: reconstructing
+   * content by applying the diff would make git's interpretation and the
+   * policy engine's interpretation two separate readings of the same text,
+   * and any gap between them is a gap an injection can be aimed at.
+   *
+   * Carrying the content forward is what keeps "what the policy engine
+   * inspected" and "what landed in the branch" the same object.
+   */
+  readonly files: readonly FileChange[];
 }
 
 export function applyEditPlan(
@@ -244,6 +258,7 @@ export function applyEditPlan(
   return {
     diff: formatUnifiedDiff(changes, options.context === undefined ? {} : { context: options.context }),
     changedPaths: changes.map((change) => change.path),
+    files: changes,
   };
 }
 

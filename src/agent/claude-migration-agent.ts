@@ -37,6 +37,7 @@
 
 import type Anthropic from "@anthropic-ai/sdk";
 import type { TestOutcome } from "../forge/pull-request.ts";
+import type { FileChange } from "./unified-diff.ts";
 import { deriveBlastRadius } from "../policy/blast-radius.ts";
 import type { MigrationAgent, RepositoryContext } from "../workflows/migrate-repository.ts";
 import {
@@ -157,6 +158,7 @@ export class ClaudeMigrationAgent implements MigrationAgent {
     impactedSymbols?: readonly string[];
   }): Promise<{
     diff: string;
+    files: readonly FileChange[];
     blastRadius: readonly string[];
     summary: string;
     verification: VerificationResult;
@@ -253,6 +255,11 @@ export class ClaudeMigrationAgent implements MigrationAgent {
 
     return {
       diff: applied.diff,
+      // The bytes the diff above describes. The forge writes these rather than
+      // re-deriving them from the diff, which would put a second reader
+      // between what the policy engine inspected and what lands in the branch
+      // (see the header of `unified-diff.ts`).
+      files: applied.files,
       // The radius as computed in step 2 — never the set of files the model
       // touched. Handing the policy engine the agent's own footprint would
       // make the blast-radius rule tautological.

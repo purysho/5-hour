@@ -115,6 +115,7 @@ function buildDeps(
     ({
       generate: async () => ({
         diff: overrides.diff ?? CLEAN_DIFF,
+        files: [{ path: "src/client.ts", before: "before", after: "after" }],
         blastRadius: ["src/client.ts"],
         summary: "Migrate acme-sdk callbacks to promises",
         verification: {
@@ -312,6 +313,7 @@ describe("the happy path", () => {
     const deps = buildDeps();
     deps.agent.generate = async () => ({
       diff: CLEAN_DIFF,
+      files: [{ path: "src/client.ts", before: "before", after: "after" }],
       blastRadius: ["src/client.ts"],
       summary: "Migrate acme-sdk callbacks to promises",
       verification: { tests: "failed" as const, command: "npm test" },
@@ -372,6 +374,7 @@ describe("policy enforcement in the pipeline", () => {
     const deps = buildDeps({ diff: escalating });
     deps.agent.generate = async () => ({
       diff: escalating,
+      files: [{ path: "package.json", before: "before", after: "after" }],
       blastRadius: ["package.json"],
       summary: "Bump acme-sdk",
       verification: { tests: "passed" as const, command: "npm test" },

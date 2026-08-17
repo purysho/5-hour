@@ -16,6 +16,7 @@ import { parseUnifiedDiff } from "../policy/diff.ts";
 import { issueOptOutToken, recordOptOutToken } from "../outbound/suppression.ts";
 import type { Impact } from "../discover/affected.ts";
 import type { UntrustedContent } from "../agent/untrusted.ts";
+import type { FileChange } from "../agent/unified-diff.ts";
 
 /**
  * The migration workflow — the pipeline every other component exists to serve.
@@ -82,6 +83,15 @@ export interface MigrationAgent {
   }): Promise<{
     diff: string;
     /**
+     * The post-migration contents the diff above describes.
+     *
+     * The forge writes these bytes. It must not reconstruct them by applying
+     * the diff: that would give the diff two readers — the policy engine and
+     * git — who are not guaranteed to agree, and any gap between them is a gap
+     * an injection can be aimed at (see the header of `unified-diff.ts`).
+     */
+    files: readonly FileChange[];
+    /**
      * The files the migration was permitted to touch. Computed from the
      * upstream change before generation, never from the generated diff.
      */
@@ -110,9 +120,12 @@ export interface ForgeClient {
     name: string;
     baseSha: string;
     branch: string;
+    baseBranch: string;
     title: string;
     body: string;
-    diff: string;
+    /** Contents, not a diff. See the note on `MigrationAgent`'s `files`. */
+    files: readonly FileChange[];
+    commitMessage: string;
   }): Promise<{ number: number; url: string }>;
 }
 
@@ -351,9 +364,13 @@ export function migrateRepositoryWorkflow(deps: MigrationDeps) {
         name: loaded.repository.forgeName,
         baseSha: input.baseSha,
         branch: `driftless/${input.changeId.slice(0, 8)}`,
+        baseBranch: loaded.repository.defaultBranch,
         title: composed.title,
         body: composed.body,
-        diff: generated.diff,
+        // The contents the policy engine's diff describes, carried through
+        // rather than re-derived. See the note on `ForgeClient`.
+        files: generated.files,
+        commitMessage: composed.title,
       });
 
       // Only the non-secret outcome crosses the step boundary.
