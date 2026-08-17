@@ -23,15 +23,16 @@
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.117.1",
+    "@aws-sdk/client-kms": "^3.1111.0",
     "pg": "^8.13.1",
     "typescript": "^5.7.2"
   },
   "devDependencies": {
     "@eslint/js": "^9.0.0",
-    "@typescript-eslint/eslint-plugin": "^8.0.0",
-    "@typescript-eslint/parser": "^8.0.0",
     "@types/node": "^22.10.2",
     "@types/pg": "^8.11.10",
+    "@typescript-eslint/eslint-plugin": "^8.0.0",
+    "@typescript-eslint/parser": "^8.0.0",
     "@vitest/coverage-v8": "^2.1.8",
     "eslint": "^9.0.0",
     "globals": "^15.0.0",

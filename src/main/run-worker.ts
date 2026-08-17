@@ -39,6 +39,7 @@ import { PostgresSweepStore, SweepScheduler } from "../schedule/sweep-scheduler.
 import { ApprovalTrigger, PostgresApprovalStore } from "../schedule/approval-trigger.ts";
 import { GitHubApp } from "../github/app.ts";
 import { FileSigner, KmsSigner, type KmsClient } from "../github/signer.ts";
+import { AwsKmsClient } from "../github/kms-signer.ts";
 import { GitHubForgeClient, type ForgeHttpClient } from "../forge/github-forge.ts";
 import { GitHubContentClient } from "../forge/github-contents.ts";
 import {
@@ -291,19 +292,18 @@ log("worker exited");
 /**
  * The KMS client.
  *
- * Not implemented, and it fails loudly rather than quietly falling back to a
- * file: ADR-0002 §2 makes the non-exportable key the destination, and a
- * "temporary" silent downgrade to an in-process key is exactly how an interim
- * position becomes permanent. Configuring `kms` and getting `file` would also
- * mean the operator believes they have a guarantee they do not have.
+ * Uses AWS KMS to sign GitHub App JWTs. The private key never enters the
+ * application process; only the ability to request signatures is granted
+ * (ADR-0002 §2). Credentials are loaded from the default AWS SDK chain:
+ * environment variables, ~/.aws/credentials, or EC2 IAM instance role.
+ *
+ * IAM policy required:
+ *   {
+ *     "Effect": "Allow",
+ *     "Action": ["kms:Sign"],
+ *     "Resource": "arn:aws:kms:region:account:key/key-id"
+ *   }
  */
 function kmsClient(): KmsClient {
-  return {
-    async sign() {
-      throw new Error(
-        "KMS signing is configured but no KMS client is wired in. Implement one, " +
-          "or configure file-based signing explicitly (ADR-0012).",
-      );
-    },
-  };
+  return new AwsKmsClient();
 }
