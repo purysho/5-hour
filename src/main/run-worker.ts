@@ -36,6 +36,7 @@ import { planRolloutWorkflow } from "../workflows/plan-rollout.ts";
 import { NpmCollector } from "../detect/npm.ts";
 import { NpmSurfaceSource } from "../detect/npm-surface-source.ts";
 import { PostgresSweepStore, SweepScheduler } from "../schedule/sweep-scheduler.ts";
+import { ApprovalTrigger, PostgresApprovalStore } from "../schedule/approval-trigger.ts";
 import { GitHubApp } from "../github/app.ts";
 import { FileSigner, KmsSigner, type KmsClient } from "../github/signer.ts";
 import { GitHubForgeClient, type ForgeHttpClient } from "../forge/github-forge.ts";
@@ -260,12 +261,28 @@ const scheduler = new SweepScheduler({
   log: (event, detail) => log(event, detail),
 }).start(config.worker.schedulerIntervalMs);
 
+// ── Approval trigger ────────────────────────────────────────────────────────
+//
+// Watches `approved_at` and enqueues `plan-rollout`. Without it, approval is a
+// column nobody reads: a human approves a change and nothing happens, because
+// nothing else in the system enqueues that workflow.
+//
+// Safe in every worker for the same reason as the scheduler, by a different
+// mechanism: the dedupe key `rollout:<change id>` is unique across every job
+// status, so N triggers produce one rollout per approval rather than N.
+const approvals = new ApprovalTrigger({
+  store: new PostgresApprovalStore(db),
+  queue,
+  log: (event, detail) => log(event, detail),
+}).start(config.worker.schedulerIntervalMs);
+
 installSignalHandlers(worker, log);
 
 await worker.finished;
 // After the worker, so a tick in flight when SIGTERM arrived finishes its
 // enqueues rather than losing them.
 await scheduler.stop();
+await approvals.stop();
 await db.close();
 log("worker exited");
 
