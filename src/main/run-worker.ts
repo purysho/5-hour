@@ -45,6 +45,7 @@ import {
   AnthropicModelClient,
   ClaudeMigrationAgent,
 } from "../agent/claude-migration-agent.ts";
+import { GVisorVerifier } from "../sandbox/gvisor-verifier.ts";
 import { auditFor, createMigrationDeps, createRolloutDeps, installedRepositoryCount } from "./wiring.ts";
 
 const config = loadConfig();
@@ -202,6 +203,7 @@ if (config.anthropic.apiKey) {
     model: new AnthropicModelClient({
       client: new Anthropic({ apiKey: Secret.reveal(config.anthropic.apiKey) }),
     }),
+    verifier: new GVisorVerifier({ log }),
     log,
   });
 
