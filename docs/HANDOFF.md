@@ -48,6 +48,12 @@ orders every control.
 | Credential broker + git helper | `src/github/credential-{helper,broker}.ts` |
 | Sandbox environment + egress | `src/sandbox/environment.ts`, `test/sandbox/` |
 | End-to-end migration workflow | `src/workflows/migrate-repository.ts`, `test/workflows/` |
+| Fan-out planning (canary) | `src/workflows/plan-rollout.ts`, `test/workflows/plan-rollout.test.ts` |
+| Opening the pull request | `src/forge/github-forge.ts`, `test/forge/github-forge.test.ts` |
+| Reading a downstream repository | `src/forge/github-contents.ts`, `test/forge/github-contents.test.ts` |
+| Audit sink for token mints | `src/audit/sink.ts`, `test/audit/sink.test.ts` |
+| Production dependency wiring | `src/main/wiring.ts`, `test/main/wiring.test.ts` |
+| Approval → rollout trigger | `src/schedule/approval-trigger.ts`, `migrations/010_approved_changes.sql` |
 | Change corroboration + canary sizing | `src/detect/corroborate.ts`, `test/detect/` |
 | Semver precedence + breaking detection | `src/detect/semver.ts` |
 | npm registry + artifact collectors | `src/detect/npm.ts` |
@@ -65,11 +71,26 @@ orders every control.
 | Public homepage | `src/http/landing.ts` (served at `/`) |
 | File-backed signer (interim) | `src/github/signer.ts`, ADR-0012 |
 
-**Not started:** downstream repository discovery, the runner sandbox itself,
-migration generation, the dashboard. Detection has its gate, its version
-semantics, and its npm collectors, but nothing yet schedules a sweep. The
-credential layer is complete in logic but is not wired to a real GitHub App,
-a real KMS, or the unix-socket transport.
+**Not started:** the runner sandbox itself, and the dashboard.
+
+The pipeline is now connected end to end: an installation webhook records
+repositories, the scheduler sweeps watched packages, a human sets
+`approved_at`, the approval trigger enqueues `plan-rollout`, and that enqueues
+one `migrate-repository` job per canary target. What each stage does *not* do
+is as load-bearing as what it does — see the file headers, particularly
+`plan-rollout.ts` on why the canary is small and `wiring.ts` on why nothing is
+defaulted to make a job runnable.
+
+The credential layer is complete in logic and now wired to a real GitHub App
+in `run-worker.ts`. It is still not wired to a real KMS (ADR-0012 governs the
+interim file-backed signer) or to the unix-socket transport.
+
+Two honest gaps worth knowing before reading further. There is no sandbox, so
+every migration reports `tests: not-run` — in the pull request body and in the
+worker's startup log. And `downstreamCount` is the tenant's installed
+repository count rather than the number of repositories that declare the
+package, because nothing stores the latter; it is an upper bound, used only
+where an upper bound is safe.
 
 ## Non-negotiables
 
@@ -204,10 +225,15 @@ make a change pass, stop.
    inference, deterministic application, and a diff Driftless renders itself.
    `src/agent/unified-diff.ts` is round-tripped against real `git apply` and
    against the parser that feeds the policy engine. What remains here is the
-   `Verifier` — which is blocked on the sandbox, item 5 — and a `ForgeClient`
-   that actually opens the pull request. Until both exist,
-   `src/main/run-worker.ts` declines to register `migrate-repository` and logs
-   the remaining blockers individually.
+   `Verifier`, which is blocked on the sandbox, item 5. The `ForgeClient` now
+   exists (`src/forge/github-forge.ts`): it writes file *contents* through the
+   Git Data API rather than applying a diff, never force-updates a branch, and
+   preserves file modes — each for a reason its header explains.
+
+   `migrate-repository` is registered whenever `ANTHROPIC_API_KEY` is present.
+   Running without a sandbox is not a stub: verification reports `not-run`,
+   truthfully, everywhere it is reported. Running without a model would be, so
+   that case stays unregistered.
 
 **Deploying:** `docs/DEPLOYMENT.md`, start to finish.
 
@@ -229,11 +255,16 @@ Configuration is validated at startup and the process refuses to boot on any
 problem — including `GITHUB_PRIVATE_KEY` being set at all, which means the
 signing key has been exposed to the environment and needs rotating.
 
-`run-worker.ts` deliberately registers only `detect-changes`. Registering
-`migrate-repository` without real `MigrationAgent` and `ForgeClient`
-implementations would dequeue real jobs and burn their retry budget failing
-for reasons unrelated to the job. Queued is recoverable;
-failed-and-retried-to-death is not.
+`run-worker.ts` registers `detect-changes`, `plan-rollout`, and —
+when `ANTHROPIC_API_KEY` is set — `migrate-repository`. It also starts two
+clocks: the sweep scheduler and the approval trigger. Both are safe to run in
+every worker, by different mechanisms: the scheduler claims in the database,
+the trigger relies on a job dedupe key that is unique across every status.
+
+The registration rule has not changed, only what satisfies it. A workflow
+whose collaborators do not exist is not registered, because dequeuing a real
+job to fail it for reasons unrelated to the job burns its retry budget.
+Queued is recoverable; failed-and-retried-to-death is not.
 
 **Source must stay strip-mode compatible.** The project runs under
 `node --experimental-strip-types`, which erases types but does not transform
