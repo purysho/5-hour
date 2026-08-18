@@ -86,6 +86,12 @@ export type ForgeEvent =
       readonly repository: RepositoryRef;
       readonly number: number;
       readonly merged: boolean;
+    }
+  | {
+      readonly type: "push";
+      readonly installationId: number;
+      readonly repository: RepositoryRef;
+      readonly ref: string;
     };
 
 export interface RepositoryRef {
@@ -279,6 +285,19 @@ function interpret(eventType: string, payload: unknown): WebhookOutcome {
         // get about migration quality; merged is the metric that matters.
         merged: record["merged"] === true,
       },
+    };
+  }
+
+  if (eventType === "push") {
+    if (installationId === null) return { kind: "rejected", reason: "unexpected-shape" };
+    const repository = readRepository(body["repository"]);
+    const ref = body["ref"];
+    if (repository === null || typeof ref !== "string") {
+      return { kind: "rejected", reason: "unexpected-shape" };
+    }
+    return {
+      kind: "accepted",
+      event: { type: "push", installationId, repository, ref },
     };
   }
 
