@@ -289,13 +289,13 @@ sudo systemctl enable --now driftless-worker
 
 Update GitHub App settings:
 
-1. Set **Webhook URL** to `https://driftless.your-domain.com/webhook/github`
+1. Set **Webhook URL** to `https://driftless.your-domain.com/webhooks/github`
 2. Confirm **Webhook secret** matches config
 
 Test:
 
 ```bash
-curl -X POST https://driftless.your-domain.com/webhook/github \
+curl -X POST https://driftless.your-domain.com/webhooks/github \
   -H "Content-Type: application/json" \
   -H "X-GitHub-Delivery: $(uuidgen)" \
   -H "X-GitHub-Event: ping" \
