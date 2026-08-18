@@ -117,6 +117,10 @@ async function handleRequest(
         applied: result.applied,
         detail: result.detail,
       });
+    } else if (outcome.kind === "ignored") {
+      deps.log("webhook ignored", { reason: outcome.reason });
+    } else if (outcome.kind === "duplicate") {
+      deps.log("webhook duplicate", { deliveryId: outcome.deliveryId });
     }
 
     // Acknowledge duplicates and ignored events with 200. A non-2xx makes
