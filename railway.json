@@ -4,9 +4,6 @@
     "builder": "RAILPACK"
   },
   "deploy": {
-    "startCommand": "pnpm start:server",
-    "healthcheckPath": "/health",
-    "healthcheckTimeout": 30,
     "restartPolicyType": "ON_FAILURE",
     "restartPolicyMaxRetries": 10
   }
