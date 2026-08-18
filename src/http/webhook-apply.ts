@@ -74,6 +74,12 @@ export async function applyForgeEvent(
         return removeRepositories(client, event.installationId, event.repositories);
       case "pull_request.closed":
         return recordPullRequestOutcome(client, event);
+      case "push":
+        return {
+          applied: true,
+          detail: `push to ${event.repository.owner}/${event.repository.name} on ${event.ref}`,
+          auditAction: "push",
+        };
     }
   });
 }
