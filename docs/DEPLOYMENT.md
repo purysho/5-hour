@@ -284,9 +284,14 @@ aws kms create-key \
 export KMS_KEY_ID="arn:aws:kms:us-east-1:123456789012:key/..."
 
 # 2. A wrapping key and a single-use import token.
+#
+#    RSA_AES_KEY_WRAP_SHA_256, not RSAES_OAEP_SHA_256. The latter is for
+#    256-bit symmetric material and cannot carry a private key: RSA-OAEP over a
+#    4096-bit key holds ~446 bytes, and a PKCS#8 RSA-2048 private key is ~1.2 KB.
+#    Choosing it fails at the wrap step with "data too large for key size".
 aws kms get-parameters-for-import \
   --key-id "$KMS_KEY_ID" \
-  --wrapping-algorithm RSAES_OAEP_SHA_256 \
+  --wrapping-algorithm RSA_AES_KEY_WRAP_SHA_256 \
   --wrapping-key-spec RSA_4096 \
   --region us-east-1 \
   --query '{key:PublicKey,token:ImportToken}' --output json > import-params.json
@@ -298,26 +303,45 @@ open('wrapping.der','wb').write(base64.b64decode(p['key']))
 open('token.bin','wb').write(base64.b64decode(p['token']))
 "
 
-# 3. GitHub hands out PKCS#1; KMS imports PKCS#8. Convert, then wrap.
+# 3. GitHub hands out PKCS#1; KMS imports PKCS#8.
 openssl pkcs8 -topk8 -nocrypt -inform PEM -outform DER \
   -in github-app.private-key.pem -out key.pkcs8.der
 
-openssl pkeyutl -encrypt \
-  -in key.pkcs8.der -out key.wrapped.bin \
-  -pubin -inkey wrapping.der -keyform DER \
-  -pkeyopt rsa_padding_mode:oaep -pkeyopt rsa_oaep_md:sha256
+# 4. The hybrid wrap, which is what RSA_AES_KEY_WRAP_SHA_256 means: an
+#    ephemeral AES key wraps the material under RFC 5649, RSA-OAEP wraps the
+#    AES key, and the result is the RSA part followed by the AES part.
+#    A65959A6 is RFC 5649's alternative IV and is fixed, not a nonce.
+#
+#    `od` rather than `xxd` for the hex: xxd ships with vim-common and is
+#    absent from several minimal images including some CloudShell builds, where
+#    it fails by producing an empty -K that OpenSSL pads to an all-zero key
+#    rather than by erroring.
+openssl rand -out aes-key.bin 32
+HEXKEY=$(od -An -vtx1 < aes-key.bin | tr -d ' \n')
 
-# 4. Import. EXPIRES_ON is available if you would rather it lapse.
+openssl enc -id-aes256-wrap-pad -K "$HEXKEY" -iv A65959A6 \
+  -in key.pkcs8.der -out material-wrapped.bin
+
+openssl pkeyutl -encrypt -in aes-key.bin -out aes-key-wrapped.bin \
+  -pubin -inkey wrapping.der -keyform DER \
+  -pkeyopt rsa_padding_mode:oaep -pkeyopt rsa_oaep_md:sha256 \
+  -pkeyopt rsa_mgf1_md:sha256
+
+cat aes-key-wrapped.bin material-wrapped.bin > EncryptedKeyMaterial.bin
+
+# 5. Import. EXPIRES_ON is available if you would rather it lapse.
 aws kms import-key-material \
   --key-id "$KMS_KEY_ID" \
-  --encrypted-key-material fileb://key.wrapped.bin \
+  --encrypted-key-material fileb://EncryptedKeyMaterial.bin \
   --import-token fileb://token.bin \
   --expiration-model KEY_MATERIAL_DOES_NOT_EXPIRE \
   --region us-east-1
 
-# 5. The plaintext key has now existed on this disk. Remove it.
-shred -u key.pkcs8.der key.wrapped.bin github-app.private-key.pem \
+# 6. The plaintext key has now existed on this disk. Remove it.
+shred -u key.pkcs8.der aes-key.bin material-wrapped.bin aes-key-wrapped.bin \
+  EncryptedKeyMaterial.bin github-app.private-key.pem \
   wrapping.der token.bin import-params.json
+unset HEXKEY
 ```
 
 Step 5 is not tidiness. ADR-0002 §2 wants a key that cannot be exported, and
@@ -331,7 +355,7 @@ repositories:
 ```bash
 aws kms describe-key --key-id "$KMS_KEY_ID" \
   --query 'KeyMetadata.{Origin:Origin,State:KeyState}'
-# Origin EXTERNAL, KeyState Enabled. PendingImport means step 4 did not take.
+# Origin EXTERNAL, KeyState Enabled. PendingImport means step 5 did not take.
 ```
 
 ### Granting the signer access
