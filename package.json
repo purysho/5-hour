@@ -20,6 +20,7 @@
     "db:provider": "node --experimental-strip-types scripts/create-provider.ts",
     "db:watch": "node --experimental-strip-types scripts/watch-package.ts",
     "db:approve": "node --experimental-strip-types scripts/approve-change.ts",
+    "db:status": "node --experimental-strip-types scripts/status.ts",
     "start:worker": "node --experimental-strip-types src/main/run-worker.ts",
     "start:server": "node --experimental-strip-types src/main/run-server.ts",
     "start": "pnpm start:server",

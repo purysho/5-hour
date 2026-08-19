@@ -158,6 +158,27 @@ The approval trigger enqueues `plan-rollout` on its next tick, and one approval
 earns exactly one rollout — guaranteed by a unique dedupe key, not by the
 scheduler behaving.
 
+### Watching it run
+
+Approving a change removes it from `pnpm db:approve` — that command lists what
+is *waiting*, and an approved change is not. That is correct for a to-do list
+and leaves nothing to watch a rollout with, so there is a read-only view:
+
+```bash
+pnpm db:status
+```
+
+It prints the four places this pipeline stalls, in the order it runs: nothing
+watched, nothing detected, nothing approved, nothing dequeued. Reading it top
+to bottom is meant to identify which one without needing a query.
+
+Two fields repay attention. `last swept never` is a different problem from a
+recent sweep with no change to show for it — the first means the scheduler has
+not reached the package, the second means detection ran and found nothing.
+And `approved` and `rollout queued` are reported separately: the gap between
+them is the approval trigger not having ticked, and collapsing them would hide
+exactly that.
+
 ### The whole first-run sequence
 
 ```bash
@@ -168,6 +189,7 @@ pnpm db:watch react 18.2.0               # something to detect
 # wait for a sweep, then:
 pnpm db:approve                          # review what was found
 pnpm db:approve <change-key> --by you    # open the gate
+pnpm db:status                           # watch the rollout from there
 ```
 
 Skip any one of these and the system runs, logs cleanly, and does nothing.
