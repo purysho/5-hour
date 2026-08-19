@@ -253,39 +253,106 @@ Register at your GitHub account settings → Developer settings → GitHub Apps:
 
 GitHub App signing key must be non-exportable in AWS KMS (ADR-0002 §2):
 
+**The key material has to come from GitHub. KMS must not generate it.**
+
+This is the one step where the obvious command is the wrong one. `--origin
+AWS_KMS` makes KMS generate its own keypair, and GitHub has never seen that
+key's public half — GitHub Apps generate the keypair themselves and hand you a
+`.pem`, and there is no facility to register a public key you brought. A JWT
+signed with a KMS-generated key is therefore rejected, and the rejection does
+not say "wrong key":
+
+```
+401 {"message":"A JSON web token could not be decoded"}
+```
+
+Which reads like a malformed token and sends you to inspect the JWT encoding,
+where nothing is wrong. Every installation token mint fails, so every
+repository is skipped, so a rollout targets nothing and succeeds.
+
+So the key is created empty and GitHub's `.pem` is imported into it:
+
 ```bash
-# Create RSA 2048 key for signing
+# 1. A key with NO material of its own.
 aws kms create-key \
   --description "Driftless GitHub App signing key" \
   --key-usage SIGN_VERIFY \
   --key-spec RSA_2048 \
-  --origin AWS_KMS \
+  --origin EXTERNAL \
   --region us-east-1
 
-# Save the ARN
 export KMS_KEY_ID="arn:aws:kms:us-east-1:123456789012:key/..."
+
+# 2. A wrapping key and a single-use import token.
+aws kms get-parameters-for-import \
+  --key-id "$KMS_KEY_ID" \
+  --wrapping-algorithm RSAES_OAEP_SHA_256 \
+  --wrapping-key-spec RSA_4096 \
+  --region us-east-1 \
+  --query '{key:PublicKey,token:ImportToken}' --output json > import-params.json
+
+python3 -c "
+import base64, json
+p = json.load(open('import-params.json'))
+open('wrapping.der','wb').write(base64.b64decode(p['key']))
+open('token.bin','wb').write(base64.b64decode(p['token']))
+"
+
+# 3. GitHub hands out PKCS#1; KMS imports PKCS#8. Convert, then wrap.
+openssl pkcs8 -topk8 -nocrypt -inform PEM -outform DER \
+  -in github-app.private-key.pem -out key.pkcs8.der
+
+openssl pkeyutl -encrypt \
+  -in key.pkcs8.der -out key.wrapped.bin \
+  -pubin -inkey wrapping.der -keyform DER \
+  -pkeyopt rsa_padding_mode:oaep -pkeyopt rsa_oaep_md:sha256
+
+# 4. Import. EXPIRES_ON is available if you would rather it lapse.
+aws kms import-key-material \
+  --key-id "$KMS_KEY_ID" \
+  --encrypted-key-material fileb://key.wrapped.bin \
+  --import-token fileb://token.bin \
+  --expiration-model KEY_MATERIAL_DOES_NOT_EXPIRE \
+  --region us-east-1
+
+# 5. The plaintext key has now existed on this disk. Remove it.
+shred -u key.pkcs8.der key.wrapped.bin github-app.private-key.pem \
+  wrapping.der token.bin import-params.json
 ```
 
-### Implement KMS Signer
+Step 5 is not tidiness. ADR-0002 §2 wants a key that cannot be exported, and
+the import unavoidably puts the plaintext key on a filesystem for the duration
+— which is the whole risk this arrangement exists to end. Delete the GitHub
+copy from the App settings page too, once a mint has succeeded.
 
-Add AWS SDK:
+Verify before deploying, rather than discovering it through skipped
+repositories:
 
 ```bash
-pnpm add @aws-sdk/client-kms
+aws kms describe-key --key-id "$KMS_KEY_ID" \
+  --query 'KeyMetadata.{Origin:Origin,State:KeyState}'
+# Origin EXTERNAL, KeyState Enabled. PendingImport means step 4 did not take.
 ```
 
-Implement `src/github/signer.ts::KmsSigner.sign()`:
+### Granting the signer access
 
-```typescript
-async sign(data: Buffer): Promise<Buffer> {
-  const response = await this.kmsClient.sign({
-    KeyId: this.keyId,
-    Message: data,
-    SigningAlgorithm: "RSASSA_PKCS1_V1_5_SHA_256",
-  });
-  return Buffer.from(response.Signature!);
-}
+Signing is implemented — `AwsKmsClient` in `src/github/kms-signer.ts`, reached
+through `KmsSigner` when `GITHUB_SIGNING_KEY_ID` is set. `@aws-sdk/client-kms`
+is already a dependency. Nothing to write; the runtime needs credentials that
+can use the key:
+
+```json
+{ "Effect": "Allow", "Action": ["kms:Sign"], "Resource": "arn:aws:kms:region:account:key/key-id" }
 ```
+
+Resolved through the default AWS chain — instance role on EC2, environment
+variables elsewhere. `kms:Sign` alone is enough; `kms:GetPublicKey` is worth
+adding only if you want to verify the imported key matches GitHub's.
+
+Note what a credentials failure looks like, because it is *not* the 401 above:
+a missing or unauthorised credential throws `KMS signing failed: …` before any
+request reaches GitHub. A 401 from GitHub means signing worked and the key is
+the wrong one.
 
 ## Step 2: Provision Infrastructure
 
@@ -471,8 +538,30 @@ Should show:
 worker starting
   workerId: ...
   workflows: ["detect-changes", "plan-rollout", "migrate-repository"]
-  verification: sandbox not implemented; migrations report tests as not-run
+  verification: sandbox implemented but not provisioned on this host ...
 ```
+
+`migrate-repository` is absent from that list when `ANTHROPIC_API_KEY` is
+unset; its jobs queue rather than fail.
+
+### Confirm the App can authenticate
+
+Do this before waiting on a rollout. A signing failure does not announce
+itself: every repository is skipped, `plan-rollout` succeeds, and the result is
+a rollout that targeted nothing and reported no error.
+
+```bash
+pnpm db:status
+```
+
+`read failed: Token mint returned 401 ... could not be decoded` against every
+repository means the signing key is not the one GitHub issued — Step 1.
+
+`pnpm preflight` does not catch this, and it is worth knowing why: its
+permission check needs the App's identity, fetching that identity needs a
+working JWT, and when signing fails it records the key as `not exercised here`
+and skips the check rather than failing. A preflight with no `permissions:`
+lines in its output has not passed that check — it has silently not run it.
 
 ### Test GitHub App
 
