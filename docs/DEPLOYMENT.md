@@ -137,6 +137,27 @@ the change it had just found the moment it ran again.
 A new row has `last_swept_at` NULL and sorts first, so the scheduler claims it
 on its next tick rather than one interval later.
 
+### Approving a change
+
+Detection does not open pull requests. `plan-rollout` refuses to fan out a
+change until a human has set `approved_at`, because fanning out the moment
+detection finds something turns one detection bug into an incident across every
+repository at once (ADR-0013). Nothing ever set that column, so detected
+changes sat at the gate indefinitely.
+
+```bash
+pnpm db:approve                                  # what is waiting, and why
+pnpm db:approve react-19-defaultprops --by alice # approve one
+```
+
+`--by` is required: approval is recorded against whoever authorised it, because
+"who decided to touch a thousand repositories" is the first question asked
+afterwards. Re-approving keeps the original approver rather than relabelling it.
+
+The approval trigger enqueues `plan-rollout` on its next tick, and one approval
+earns exactly one rollout — guaranteed by a unique dedupe key, not by the
+scheduler behaving.
+
 ### The whole first-run sequence
 
 ```bash
@@ -144,9 +165,18 @@ pnpm db:migrate                          # schema, roles, RLS
 pnpm db:provider acme "Acme Inc"         # the paying tenant
 # set DEFAULT_PROVIDER_SLUG=acme on both services, then install the App
 pnpm db:watch react 18.2.0               # something to detect
+# wait for a sweep, then:
+pnpm db:approve                          # review what was found
+pnpm db:approve <change-key> --by you    # open the gate
 ```
 
 Skip any one of these and the system runs, logs cleanly, and does nothing.
+
+Two things it will still not do, deliberately and visibly: without
+`ANTHROPIC_API_KEY` the worker leaves `migrate-repository` unregistered and its
+jobs queued rather than failing them, and every pull request it opens reports
+`tests: not-run` in its body because the verification sandbox is not built
+(ADR-0006). Both are stated in the worker's boot log on every start.
 
 ## Prerequisites
 
