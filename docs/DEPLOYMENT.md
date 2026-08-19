@@ -179,6 +179,28 @@ And `approved` and `rollout queued` are reported separately: the gap between
 them is the approval trigger not having ticked, and collapsing them would hide
 exactly that.
 
+### Re-planning after a fix
+
+One approval earns exactly one rollout, ever — `job_dedupe_key_idx` makes
+`rollout:<change id>` unique across every job status, so the approval trigger
+enqueues nothing once a rollout exists. That bounds a scheduler bug to one
+fan-out, and it also means a rollout that skipped every repository for a
+reason you have since fixed will not retry on its own.
+
+```bash
+pnpm db:replan react@19.2.8
+```
+
+It removes that one change's rollout job and leaves `approved_at` and
+`approved_by` untouched: the person who authorised the change still authorised
+it, and rewriting that to make a rollout run again falsifies the record anyone
+will actually ask for. There is no bulk form, deliberately.
+
+Note that the change key is `<package>@<to-version>` — the baseline is not part
+of it. Re-running `pnpm db:watch` with a different baseline therefore updates
+the existing change rather than creating a second one, and does not produce a
+new rollout.
+
 ### The whole first-run sequence
 
 ```bash

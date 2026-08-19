@@ -26,6 +26,7 @@
  */
 
 import pg from "pg";
+import { resolveChange } from "./resolve-change.ts";
 
 export interface PendingChange {
   readonly changeKey: string;
@@ -83,29 +84,40 @@ export async function approveChange(
   connectionString: string,
   changeKey: string,
   approvedBy: string,
-): Promise<{ alreadyApproved: boolean; packageName: string }> {
+  providerSlug?: string,
+): Promise<{ alreadyApproved: boolean; packageName: string; providerSlug: string }> {
   const client = new pg.Client({ connectionString });
   await client.connect();
   try {
-    const existing = await client.query<{ package_name: string; approved_at: string | null }>(
-      "SELECT package_name, approved_at FROM upstream_change WHERE change_key = $1",
-      [changeKey],
-    );
-    const row = existing.rows[0];
-    if (!row) throw new Error(`no change with key "${changeKey}"`);
-    if (row.approved_at !== null) {
-      return { alreadyApproved: true, packageName: row.package_name };
+    // Resolved to one provider's row before anything is written. Matching on
+    // the key alone — which this did — approved the change for *every*
+    // provider holding it, because the uniqueness is on
+    // (provider_id, change_key). One operator would have authorised a fan-out
+    // across tenants who never asked for it, recorded against their name.
+    const change = await resolveChange(client, changeKey, providerSlug);
+
+    if (change.approvedAt !== null) {
+      return {
+        alreadyApproved: true,
+        packageName: change.packageName,
+        providerSlug: change.providerSlug,
+      };
     }
 
-    // Guarded on approved_at IS NULL as well as the key, so two operators
-    // approving at once cannot overwrite each other's attribution.
+    // By id, so the write cannot reach further than the row just resolved.
+    // Still guarded on approved_at IS NULL, so two operators approving at once
+    // cannot overwrite each other's attribution.
     await client.query(
       `UPDATE upstream_change
           SET approved_at = now(), approved_by = $2
-        WHERE change_key = $1 AND approved_at IS NULL`,
-      [changeKey, approvedBy],
+        WHERE id = $1 AND approved_at IS NULL`,
+      [change.id, approvedBy],
     );
-    return { alreadyApproved: false, packageName: row.package_name };
+    return {
+      alreadyApproved: false,
+      packageName: change.packageName,
+      providerSlug: change.providerSlug,
+    };
   } finally {
     await client.end();
   }
@@ -124,6 +136,7 @@ if (isEntrypoint) {
   const connectionString = process.env["DATABASE_URL"];
   const changeKey = argv[0]?.startsWith("--") ? undefined : argv[0];
   const approvedBy = flag(argv, "by");
+  const providerSlug = flag(argv, "provider");
 
   if (!connectionString) {
     console.error("DATABASE_URL is required");
@@ -149,7 +162,10 @@ if (isEntrypoint) {
             `    ${c.corroborations} corroboration(s), ${c.impactedSymbols} impacted symbol(s)\n`,
         );
       }
-      console.log("Approve one with: pnpm db:approve <change-key> --by <your name>");
+      console.log(
+        "Approve one with: pnpm db:approve <change-key> --by <your name>\n" +
+          "Add --provider <slug> when two providers hold the same change key.",
+      );
     }
     process.exit(0);
   }
@@ -162,15 +178,25 @@ if (isEntrypoint) {
     process.exit(1);
   }
 
-  const { alreadyApproved, packageName } = await approveChange(
-    connectionString,
-    changeKey,
-    approvedBy,
-  );
-  console.log(
-    alreadyApproved
-      ? `${changeKey} (${packageName}) was already approved — leaving the original approver in place.`
-      : `Approved ${changeKey} (${packageName}) as ${approvedBy}.\n` +
-          `The approval trigger enqueues plan-rollout on its next tick.`,
-  );
+  try {
+    const { alreadyApproved, packageName, providerSlug: slug } = await approveChange(
+      connectionString,
+      changeKey,
+      approvedBy,
+      providerSlug,
+    );
+    // The provider is named in the confirmation. Approving is a decision about
+    // one tenant's repositories, and it should not be possible to make it
+    // without seeing whose.
+    console.log(
+      alreadyApproved
+        ? `${changeKey} (${packageName}, provider ${slug}) was already approved — ` +
+            `leaving the original approver in place.`
+        : `Approved ${changeKey} (${packageName}) for provider ${slug} as ${approvedBy}.\n` +
+            `The approval trigger enqueues plan-rollout on its next tick.`,
+    );
+  } catch (error) {
+    console.error((error as Error).message);
+    process.exit(1);
+  }
 }

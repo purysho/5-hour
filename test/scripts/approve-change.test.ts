@@ -47,6 +47,58 @@ async function approvalOf(changeKey: string) {
   }
 }
 
+describe("approving across tenants", () => {
+  it("never approves another provider's change with the same key", async () => {
+    // change_key is unique per provider, not globally — two tenants watching
+    // react both hold react@19.2.8. Matching on the key alone approved every
+    // one of them at once: an operator authorising a fan-out across tenants
+    // who never asked for it, recorded against their name.
+    await seedChange("tenant-a", "shared@1.0.0");
+    await seedChange("tenant-b", "shared@1.0.0");
+
+    await expect(
+      approveChange(ADMIN_URL, "shared@1.0.0", "oliver"),
+    ).rejects.toThrow(/matches 2 providers/);
+
+    const client = await adminClient();
+    try {
+      const { rows } = await client.query<{ count: string }>(
+        "SELECT count(*) FROM upstream_change WHERE change_key = $1 AND approved_at IS NOT NULL",
+        ["shared@1.0.0"],
+      );
+      // The refusal has to be total. A partial approval would be worse than
+      // the bug: one tenant rolled out, and nobody told to look.
+      expect(Number(rows[0]!.count)).toBe(0);
+    } finally {
+      await client.end();
+    }
+  });
+
+  it("approves exactly the named provider's row when disambiguated", async () => {
+    await seedChange("tenant-c", "picked@2.0.0");
+    await seedChange("tenant-d", "picked@2.0.0");
+
+    const result = await approveChange(ADMIN_URL, "picked@2.0.0", "oliver", "tenant-c");
+    expect(result.providerSlug).toBe("tenant-c");
+
+    const client = await adminClient();
+    try {
+      const { rows } = await client.query<{ slug: string; approved_by: string | null }>(
+        `SELECT p.slug, c.approved_by
+           FROM upstream_change c JOIN provider p ON p.id = c.provider_id
+          WHERE c.change_key = $1 ORDER BY p.slug`,
+        ["picked@2.0.0"],
+      );
+      expect(rows).toEqual([
+        { slug: "tenant-c", approved_by: "oliver" },
+        { slug: "tenant-d", approved_by: null },
+      ]);
+    } finally {
+      await client.end();
+    }
+  });
+});
+
 describe("approving a change", () => {
   it("records who approved it, not just that it was approved", async () => {
     // "Who decided to touch a thousand repositories" is the first question
