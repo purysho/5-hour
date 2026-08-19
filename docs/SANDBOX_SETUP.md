@@ -20,6 +20,37 @@ This ensures:
 - **Honesty**: Tests reported as "passed" actually ran and passed (ADR-0006)
 - **Safety**: Running arbitrary test commands is safe because the sandbox bounds them
 
+## Status
+
+The verifier and the workspace are implemented (`src/sandbox/`). What remains
+is host provisioning, and it is why a worker on a managed container platform
+still reports `tests: not-run`:
+
+| Piece | State |
+| --- | --- |
+| Workspace — clone, overlay the migration, dispose | **done** (`workspace.ts`) |
+| OCI bundle, deny-by-default | **done** (`oci.ts`) |
+| Verdict from exit code, refusal without a sandbox | **done** (`gvisor-verifier.ts`) |
+| `runsc` + rootfs on the host | **not provisioned** |
+| Egress-proxied network for the dependency install | **not built** |
+
+Two consequences worth stating plainly:
+
+- **Railway (and most managed container platforms) cannot host this.** `runsc`
+  needs either KVM or `ptrace` with capabilities a managed container does not
+  grant. The verifying worker needs a VM you control, which is a deployment
+  change, not a code change.
+- **Until the egress proxy exists, only a repository whose suite runs without
+  installing anything can be verified.** The install step defaults to no
+  network, and a failed install reports `not-run` rather than `failed` — our
+  missing policy must never be rendered as the customer's tests breaking.
+
+gVisor's own isolation is not exercised by the test suite: there is no `runsc`
+in CI, so the process runner is injected and what the tests assert is the
+decision-making around it (exit-code verdicts, refusing to run unsandboxed,
+never blaming the diff for our infrastructure). Treat the escape properties as
+unverified from this repository until it has run on a provisioned host.
+
 ## Prerequisites
 
 ### Host Requirements

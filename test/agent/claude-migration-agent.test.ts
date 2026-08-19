@@ -375,7 +375,7 @@ describe("budgeting", () => {
 describe("UNVERIFIED", () => {
   it("says not-run, which is the truth", async () => {
     expect(
-      await UNVERIFIED.verify({ repository: REPOSITORY, diff: "", changedPaths: [] }),
+      await UNVERIFIED.verify({ repository: REPOSITORY, diff: "", changedPaths: [], files: [] }),
     ).toEqual({ tests: "not-run", command: null });
   });
 });

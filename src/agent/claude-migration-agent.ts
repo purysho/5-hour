@@ -88,6 +88,16 @@ export interface Verifier {
     repository: RepositoryContext;
     diff: string;
     changedPaths: readonly string[];
+    /**
+     * The post-migration contents, carried rather than described.
+     *
+     * A verifier materialises a tree and runs the suite in it, and it must
+     * write these bytes rather than re-deriving them from `diff`. Applying the
+     * diff would make what the tests ran against and what the policy engine
+     * inspected two separate readings of the same text — the gap `edit-plan.ts`
+     * refuses to open, for the same reason.
+     */
+    files: readonly FileChange[];
   }): Promise<VerificationResult>;
 }
 
@@ -251,6 +261,7 @@ export class ClaudeMigrationAgent implements MigrationAgent {
       repository: request.repository,
       diff: applied.diff,
       changedPaths: applied.changedPaths,
+      files: applied.files,
     });
 
     return {

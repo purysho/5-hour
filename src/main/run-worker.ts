@@ -13,12 +13,17 @@
  * is not.
  *
  * `migrate-repository` is registered now that a forge client, a content reader
- * and an audit sink exist. It still runs without a sandbox, and that is not a
- * stub: `UNVERIFIED` reports `tests: not-run`, the pull request body says so in
- * as many words, and the policy engine judges the diff either way. A migration
- * presented as verified when it is not would be the dishonest version; saying
- * we did not run them is the honest one, and it is what ADR-0006 leaves us
- * until the sandbox exists.
+ * and an audit sink exist. It still runs without verification, and that is not
+ * a stub: the verifier reports `tests: not-run`, the pull request body says so
+ * in as many words, and the policy engine judges the diff either way. A
+ * migration presented as verified when it is not would be the dishonest
+ * version; saying we did not run them is the honest one.
+ *
+ * Verification is implemented (src/sandbox/) but not provisioned here: it needs
+ * `runsc` and a rootfs on the host, and a checkout source to clone with. The
+ * verifier is constructed without them deliberately, so it reports which are
+ * missing per migration rather than this process claiming a capability the
+ * host does not have. See docs/SANDBOX_SETUP.md.
  *
  * The one thing it will not run without is a model. Without `ANTHROPIC_API_KEY`
  * there is nothing to generate a migration with, so the workflow stays
@@ -243,7 +248,9 @@ log("worker starting", {
   // Stated on every boot rather than buried in a document. Anyone reading the
   // logs of a running worker should know that the pull requests it opens were
   // not test-verified (ADR-0006).
-  verification: "sandbox not implemented; migrations report tests as not-run",
+  verification:
+    "sandbox implemented but not provisioned on this host (needs runsc, a " +
+    "rootfs and a checkout source); migrations report tests as not-run",
 });
 
 const worker = startWorker(queue, {

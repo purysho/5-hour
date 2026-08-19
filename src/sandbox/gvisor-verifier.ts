@@ -3,45 +3,53 @@
  *
  * ── What this does today ─────────────────────────────────────────────────────
  *
- * It reports `not-run`, and it names the prerequisite it is missing when it
- * does. It does not execute a test suite, and it does not invoke gVisor. That
- * is stated here, in the boot log, and in the pull request body, because a
- * migration presented as verified when it is not is the one failure mode that
- * makes every pull request this system opens worthless (ADR-0006).
+ * Given a sandbox and somewhere to clone from, it materialises the repository,
+ * overlays the migration, and runs the repository's own suite inside gVisor.
+ * Given either of those missing, it reports `not-run` and names what was
+ * missing — per migration, not once in a boot log.
  *
- * This file previously carried a `runInGVisor` function and a
- * `detectTestCommand` that returned `null` unconditionally, neither of which
- * was reachable from anywhere. Scaffolding that reads like an implementation is
- * worse than an honest gap: it invites the reader to believe verification is
- * one wiring change away, when in fact the interface cannot express it (below).
+ * It never falls back to running the suite outside the sandbox. That would be
+ * executing attacker-authored code beside the control plane, and a `passed`
+ * obtained that way is worth less than no verification at all (ADR-0006).
  *
- * ── Why it cannot simply be finished ─────────────────────────────────────────
+ * ── What is verified where ───────────────────────────────────────────────────
  *
- * `Verifier.verify` receives `{ repository, diff, changedPaths }`. Running a
- * test suite needs a checkout — a real directory, with the diff applied and
- * dependencies installed. None of those are reachable from this signature, and
- * no caller has one to give: `migrate-repository` works on content fetched
- * through the forge API, never a working tree.
+ * The three prerequisites named by the previous version of this file were:
  *
- * So real verification needs, in order:
+ *   1. A workspace — a real directory with the migration applied. Built now,
+ *      in ./workspace.ts, by cloning and overlaying the post-migration bytes.
+ *   2. `runsc` on the host, plus a rootfs (docs/SANDBOX_SETUP.md).
+ *   3. An egress-proxied network namespace for the dependency install —
+ *      `DEFAULT_EGRESS_ALLOWLIST` in ./environment.ts is the policy it should
+ *      enforce.
  *
- *   1. A workspace. Something that materialises a checkout, applies the diff,
- *      and hands over a path. This is the actual blocker, and it is a change
- *      to the workflow, not to this file.
- *   2. `runsc` on the worker host, plus a rootfs (docs/SANDBOX_SETUP.md).
- *   3. An egress-proxied network namespace — `DEFAULT_EGRESS_ALLOWLIST` in
- *      ./environment.ts is the policy it should enforce.
+ * (1) is done. (2) and (3) are host provisioning, and this file cannot assert
+ * them: the bundle it builds is deny-by-default (./oci.ts) and the process
+ * that runs it is injected, so both are covered by tests with a fake runner —
+ * but neither the escape properties of gVisor nor the egress policy have been
+ * exercised against a real sandboxed host from here. The sandbox is probed
+ * rather than assumed for exactly that reason, and a host without it gets
+ * `not-run` rather than a guess.
  *
- * The two pieces that do not need a workspace are implemented and tested here:
- * test-command detection, and the sandbox availability probe. They are the
- * parts that would otherwise be written in a hurry on the day the workspace
- * lands.
+ * Because (3) is unproven, the install step runs with the network the caller
+ * configures and defaults to none — so on an unprovisioned host a repository
+ * with dependencies reports `not-run` from a failed install rather than
+ * `failed`, which would read as the migration's fault.
  */
 
-import { access, constants } from "node:fs/promises";
+import { access, constants, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import { delimiter, join } from "node:path";
 import type { Verifier, VerificationResult } from "../agent/claude-migration-agent.ts";
+import type { FileChange } from "../agent/unified-diff.ts";
 import type { RepositoryContext } from "../workflows/migrate-repository.ts";
+import { buildOciConfig } from "./oci.ts";
+import { buildSandboxEnvironment } from "./environment.ts";
+import {
+  materialiseWorkspace,
+  type CheckoutRequest,
+  type CommandRunner,
+} from "./workspace.ts";
 
 /** Five minutes. A suite slower than this is not one we can gate a PR on. */
 export const DEFAULT_TIMEOUT_MS = 300_000;
@@ -119,8 +127,10 @@ export async function isSandboxAvailable(
 
 export interface GVisorVerifierOptions {
   /**
-   * Test command to run once a workspace exists. Recorded and reported; it is
-   * not executed today.
+   * Overrides the repository's own `scripts.test`.
+   *
+   * Rarely wanted: the point is to run what the repository runs. Present for
+   * a deployment that pins a command for every tenant.
    */
   readonly testCommand?: string | undefined;
   /** Timeout in milliseconds. Default five minutes. */
@@ -128,6 +138,33 @@ export interface GVisorVerifierOptions {
   readonly log?: ((event: string, detail: Record<string, unknown>) => void) | undefined;
   /** Overridden in tests. Defaults to probing PATH for `runsc`. */
   readonly sandboxAvailable?: (() => Promise<boolean>) | undefined;
+  /**
+   * Where to clone the repository from, and with what credential.
+   *
+   * Injected rather than derived here because the credential is minted per job
+   * (ADR-0002) and this module must not be the thing that decides when to mint
+   * one. Absent, there is no workspace and the result is `not-run`.
+   */
+  readonly checkoutFor?:
+    | ((repository: RepositoryContext) => Promise<CheckoutRequest | null>)
+    | undefined;
+  /** Runs a process. Injected so the bundle and argv are testable. */
+  readonly runner?: CommandRunner | undefined;
+  /** Absolute path to the rootfs the suite runs against (SANDBOX_SETUP.md). */
+  readonly rootfsPath?: string | undefined;
+  /**
+   * Command that installs dependencies, run inside the sandbox before the
+   * suite. Inside, because an install executes lifecycle scripts — running it
+   * on the host would be the exact arbitrary execution the sandbox exists to
+   * contain.
+   */
+  readonly installCommand?: string | undefined;
+  /**
+   * Whether the install step gets a network. Defaults to none, which is safe
+   * and means a repository with dependencies cannot install. See the header:
+   * the egress-proxied namespace is the missing piece.
+   */
+  readonly installNetwork?: "none" | "host" | undefined;
 }
 
 /**
@@ -143,22 +180,37 @@ export class GVisorVerifier implements Verifier {
   readonly #testCommand: string | undefined;
   readonly #log: (event: string, detail: Record<string, unknown>) => void;
   readonly #sandboxAvailable: () => Promise<boolean>;
+  readonly #checkoutFor:
+    | ((repository: RepositoryContext) => Promise<CheckoutRequest | null>)
+    | undefined;
+  readonly #runner: CommandRunner | undefined;
+  readonly #rootfsPath: string | undefined;
+  readonly #installCommand: string | undefined;
+  readonly #installNetwork: "none" | "host";
 
   constructor(options: GVisorVerifierOptions = {}) {
     this.#testCommand = options.testCommand;
     this.#timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
     this.#log = options.log ?? (() => {});
     this.#sandboxAvailable = options.sandboxAvailable ?? (() => isSandboxAvailable());
+    this.#checkoutFor = options.checkoutFor;
+    this.#runner = options.runner;
+    this.#rootfsPath = options.rootfsPath;
+    this.#installCommand = options.installCommand;
+    this.#installNetwork = options.installNetwork ?? "none";
   }
 
   async verify(input: {
     repository: RepositoryContext;
     diff: string;
     changedPaths: readonly string[];
+    files: readonly FileChange[];
   }): Promise<VerificationResult> {
-    // The probe is the only thing here that can throw, and an infrastructure
-    // problem must not burn a migration's retry budget — so a failure to
-    // determine availability is reported as unavailable, not raised.
+    const repository = `${input.repository.forgeOwner}/${input.repository.forgeName}`;
+
+    // The probe is infrastructure, and an infrastructure problem must not burn
+    // a migration's retry budget — so a failure to determine availability is
+    // reported as unavailable, not raised.
     const sandboxReady = await this.#sandboxAvailable().catch((error: unknown) => {
       this.#log("sandbox.probe_failed", {
         error: error instanceof Error ? error.message : String(error),
@@ -166,21 +218,129 @@ export class GVisorVerifier implements Verifier {
       return false;
     });
 
+    const missing: string[] = [];
+    if (!sandboxReady) missing.push("runsc");
+    if (!this.#rootfsPath) missing.push("rootfs");
+    if (!this.#runner) missing.push("runner");
+    if (!this.#checkoutFor) missing.push("checkout");
+
+    if (missing.length > 0) {
+      return this.#notRun(repository, missing, input.changedPaths.length);
+    }
+
+    const checkout = await this.#checkoutFor!(input.repository).catch((error: unknown) => {
+      this.#log("sandbox.checkout_unavailable", {
+        repository,
+        error: error instanceof Error ? error.message : String(error),
+      });
+      return null;
+    });
+    if (!checkout) return this.#notRun(repository, ["checkout"], input.changedPaths.length);
+
+    let workspace;
+    try {
+      workspace = await materialiseWorkspace({
+        checkout,
+        // The bytes, never the diff. See the header of ./workspace.ts.
+        overlay: input.files.map((file) => ({ path: file.path, content: file.after })),
+        runner: this.#runner!,
+        timeoutMs: this.#timeoutMs,
+      });
+    } catch (error) {
+      // A tree we could not build is not a failing suite. Reporting `failed`
+      // here would blame the migration for our own infrastructure.
+      this.#log("sandbox.workspace_failed", {
+        repository,
+        error: error instanceof Error ? error.message : String(error),
+      });
+      return { tests: "not-run", command: null };
+    }
+
+    try {
+      const manifest = await readFile(join(workspace.path, "package.json"), "utf8").catch(
+        () => null,
+      );
+      const command = this.#testCommand ?? (manifest ? detectTestCommand(manifest) : null);
+      if (!command) {
+        // A repository with no suite is not an unverified one. `no-suite` is a
+        // different fact from `not-run`, and the pull request body says so.
+        this.#log("sandbox.no_suite", { repository });
+        return { tests: "no-suite", command: null };
+      }
+
+      if (this.#installCommand) {
+        const install = await this.#runSandboxed(workspace.path, this.#installCommand, {
+          network: this.#installNetwork,
+        });
+        if (install.code !== 0) {
+          // An install that could not reach a registry is our missing egress
+          // policy, not the migration's fault.
+          this.#log("sandbox.install_failed", {
+            repository,
+            code: install.code,
+            network: this.#installNetwork,
+          });
+          return { tests: "not-run", command: null };
+        }
+      }
+
+      const result = await this.#runSandboxed(workspace.path, command, { network: "none" });
+      this.#log("sandbox.tests_ran", { repository, command, code: result.code });
+
+      // Only an exit code decides this. Parsing a suite's output to guess
+      // whether it "really" passed is how a `passed` gets reported for a run
+      // that did not.
+      return { tests: result.code === 0 ? "passed" : "failed", command };
+    } finally {
+      await workspace.dispose();
+    }
+  }
+
+  #notRun(
+    repository: string,
+    missing: readonly string[],
+    changedPaths: number,
+  ): VerificationResult {
     this.#log("sandbox.not_run", {
-      // Both are reported, because they are independent and a deployment can
-      // fix one without the other. `workspace` is the blocker that outlives
-      // any host provisioning.
-      missing: sandboxReady ? ["workspace"] : ["workspace", "runsc"],
-      repository: `${input.repository.forgeOwner}/${input.repository.forgeName}`,
-      changedPaths: input.changedPaths.length,
+      missing: [...missing],
+      repository,
+      changedPaths,
       configuredTimeoutMs: this.#timeoutMs,
       configuredTestCommand: this.#testCommand ?? null,
     });
-
     // `command: null`, not the configured command. The field means "the
     // command we ran", and it is rendered as such in the pull request body;
     // naming a command beside `not-run` would imply an attempt that did not
     // happen.
     return { tests: "not-run", command: null };
+  }
+
+  /** Writes an OCI bundle for one command and runs it under `runsc`. */
+  async #runSandboxed(
+    workspacePath: string,
+    command: string,
+    options: { network: "none" | "host" },
+  ): Promise<{ code: number; stdout: string; stderr: string }> {
+    const bundle = await mkdtemp(join(tmpdir(), "driftless-bundle-"));
+    try {
+      const config = buildOciConfig({
+        workspacePath,
+        rootfsPath: this.#rootfsPath!,
+        // `sh -c` because a package.json test script is a shell string, not an
+        // argv. It is the repository's own command either way.
+        command: ["/bin/sh", "-c", command],
+        env: buildSandboxEnvironment({ jobId: "verify", workspace: "/work" }),
+        network: options.network,
+      });
+      await writeFile(join(bundle, "config.json"), JSON.stringify(config, null, 2), "utf8");
+
+      return await this.#runner!.run(
+        "runsc",
+        ["--bundle", bundle, "run", `driftless-${Date.now()}`],
+        { cwd: bundle, timeoutMs: this.#timeoutMs },
+      );
+    } finally {
+      await rm(bundle, { recursive: true, force: true }).catch(() => {});
+    }
   }
 }
