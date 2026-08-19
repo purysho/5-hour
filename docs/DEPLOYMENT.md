@@ -111,6 +111,43 @@ If the App was already installed before the provider existed, **reinstall it**
 after setting the variable. Enrolment rides on `installation.created`, and
 GitHub only sends that at install time.
 
+### Watching a package
+
+Enrolment gives the system repositories. It still needs something to detect.
+
+Driftless is driven by *upstream* packages, not by pushes: the sweep scheduler
+turns `watched_package` rows into `detect-changes` jobs on a clock, and
+plan-rollout and migrate-repository hang off that. A push to a consumer
+repository is recorded and goes no further, by design.
+
+`watched_package` had the same gap enrolment did — nothing outside the test
+suite ever inserted a row, so the scheduler swept an empty list on every tick:
+
+```bash
+pnpm db:watch react 18.2.0                  # uses DEFAULT_PROVIDER_SLUG
+pnpm db:watch react 18.2.0 --interval 600   # sweep every 10 minutes
+```
+
+The baseline is the version consumers are assumed to be **on**, and every
+comparison is made against it. Setting it to the latest release finds nothing —
+set it to the version you are migrating *from*. The sweep never advances the
+baseline itself, deliberately: a sweep that moved its own baseline would forget
+the change it had just found the moment it ran again.
+
+A new row has `last_swept_at` NULL and sorts first, so the scheduler claims it
+on its next tick rather than one interval later.
+
+### The whole first-run sequence
+
+```bash
+pnpm db:migrate                          # schema, roles, RLS
+pnpm db:provider acme "Acme Inc"         # the paying tenant
+# set DEFAULT_PROVIDER_SLUG=acme on both services, then install the App
+pnpm db:watch react 18.2.0               # something to detect
+```
+
+Skip any one of these and the system runs, logs cleanly, and does nothing.
+
 ## Prerequisites
 
 ### AWS Account & CLI
