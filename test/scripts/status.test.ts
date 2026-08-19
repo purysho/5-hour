@@ -89,6 +89,77 @@ describe("pipeline status", () => {
     expect(render(status)).toContain("last swept never");
   });
 
+  it("names the enrolment gap when a rollout targeted nothing", async () => {
+    // The state this pipeline lands in most often, and the least legible:
+    // plan-rollout succeeds, no pull request exists, and the count of
+    // migrate-repository jobs is zero rather than wrong. `targeted 0` with
+    // nothing skipped means there were no repositories to begin with.
+    const providerId = await seed("status-empty-rollout");
+    const client = await adminClient();
+    try {
+      await client.query(
+        `INSERT INTO job (provider_id, workflow, status, result, finished_at)
+              VALUES ($1, 'plan-rollout', 'succeeded',
+                      '{"kind":"planned","targeted":0,"enqueued":0,"skipped":[]}'::jsonb,
+                      now())`,
+        [providerId],
+      );
+    } finally {
+      await client.end();
+    }
+
+    const output = render(await readStatus(ADMIN_URL));
+    expect(output).toContain("no candidate repositories");
+  });
+
+  it("points at enrolment when there are no repositories at all", async () => {
+    // Rendered from a constructed status rather than the database: the counts
+    // are deployment-wide, and a shared test database always has rows from
+    // somewhere else. What matters is that zero repositories names the cause —
+    // `installation.created` fires only at install time, so an App installed
+    // before DEFAULT_PROVIDER_SLUG was set never enrolled and never will
+    // without a reinstall.
+    const output = render({
+      enrolment: {
+        consumers: 0,
+        installations: 0,
+        suspendedInstallations: 0,
+        repositories: 0,
+        archivedRepositories: 0,
+      },
+      watched: [],
+      changes: [],
+      jobs: [],
+      rollouts: [],
+      failures: [],
+    });
+    expect(output).toContain("no repositories");
+    expect(output).toContain("installation.created");
+    expect(output).toContain("DEFAULT_PROVIDER_SLUG");
+  });
+
+  it("prints each skipped repository's reason", async () => {
+    // Repositories that exist and were filtered is a different problem from
+    // no repositories, and the reason is only ever in the job result.
+    const providerId = await seed("status-skipped-rollout");
+    const client = await adminClient();
+    try {
+      await client.query(
+        `INSERT INTO job (provider_id, workflow, status, result, finished_at)
+              VALUES ($1, 'plan-rollout', 'succeeded',
+                      '{"kind":"planned","targeted":0,"enqueued":0,"skipped":[
+                         {"owner":"acme","name":"web","reason":"manifest could not be read"}
+                       ]}'::jsonb, now())`,
+        [providerId],
+      );
+    } finally {
+      await client.end();
+    }
+
+    const output = render(await readStatus(ADMIN_URL));
+    expect(output).toContain("skipped acme/web: manifest could not be read");
+  });
+
   it("prints why a failed job failed, not just that it did", async () => {
     // A failed job is neither pending nor running, so it is invisible in a
     // status count; 'failed 1' tells nobody what to do next.

@@ -46,6 +46,22 @@ export interface ChangeRow {
   readonly rolloutQueued: boolean;
 }
 
+export interface EnrolmentCounts {
+  readonly consumers: number;
+  readonly installations: number;
+  readonly suspendedInstallations: number;
+  readonly repositories: number;
+  readonly archivedRepositories: number;
+}
+
+export interface RolloutResult {
+  readonly finishedAt: Date | null;
+  readonly kind: string;
+  readonly targeted: number | null;
+  readonly enqueued: number | null;
+  readonly skipped: readonly { owner: string; name: string; reason: string }[];
+}
+
 export interface JobCount {
   readonly workflow: string;
   readonly status: string;
@@ -60,9 +76,11 @@ export interface JobFailure {
 }
 
 export interface PipelineStatus {
+  readonly enrolment: EnrolmentCounts;
   readonly watched: readonly WatchedRow[];
   readonly changes: readonly ChangeRow[];
   readonly jobs: readonly JobCount[];
+  readonly rollouts: readonly RolloutResult[];
   readonly failures: readonly JobFailure[];
 }
 
@@ -70,6 +88,21 @@ export async function readStatus(connectionString: string): Promise<PipelineStat
   const client = new pg.Client({ connectionString });
   await client.connect();
   try {
+    // Counted rather than listed. "Is anything enrolled" is the question a
+    // rollout that targeted nothing raises, and the answer is a number — while
+    // listing customer repositories into a terminal is a disclosure nobody
+    // asked this command for.
+    const enrolment = await client.query(
+      `SELECT
+         (SELECT count(*) FROM consumer)::int AS consumers,
+         (SELECT count(*) FROM installation)::int AS installations,
+         (SELECT count(*) FROM installation WHERE suspended_at IS NOT NULL)::int
+           AS suspended_installations,
+         (SELECT count(*) FROM repository)::int AS repositories,
+         (SELECT count(*) FROM repository WHERE archived_at IS NOT NULL)::int
+           AS archived_repositories`,
+    );
+
     const watched = await client.query(
       `SELECT ecosystem, package_name, baseline_version, enabled,
               sweep_interval_seconds, last_swept_at
@@ -104,6 +137,18 @@ export async function readStatus(connectionString: string): Promise<PipelineStat
         ORDER BY workflow, status`,
     );
 
+    // A succeeded plan-rollout that enqueued nothing is the single most
+    // confusing state this pipeline produces: the job worked, and no pull
+    // request exists. The reason is in `result` and nowhere else, so it is
+    // read back rather than left for whoever thinks to look in the jsonb.
+    const rollouts = await client.query(
+      `SELECT finished_at, result
+         FROM job
+        WHERE workflow = 'plan-rollout' AND result IS NOT NULL
+        ORDER BY finished_at DESC NULLS LAST
+        LIMIT 3`,
+    );
+
     const failures = await client.query(
       `SELECT workflow, attempts, last_error, finished_at
          FROM job
@@ -112,7 +157,16 @@ export async function readStatus(connectionString: string): Promise<PipelineStat
         LIMIT 10`,
     );
 
+    const enrolmentRow = enrolment.rows[0];
+
     return {
+      enrolment: {
+        consumers: Number(enrolmentRow?.consumers ?? 0),
+        installations: Number(enrolmentRow?.installations ?? 0),
+        suspendedInstallations: Number(enrolmentRow?.suspended_installations ?? 0),
+        repositories: Number(enrolmentRow?.repositories ?? 0),
+        archivedRepositories: Number(enrolmentRow?.archived_repositories ?? 0),
+      },
       watched: watched.rows.map((r) => ({
         ecosystem: r.ecosystem,
         packageName: r.package_name,
@@ -134,6 +188,13 @@ export async function readStatus(connectionString: string): Promise<PipelineStat
         workflow: r.workflow,
         status: r.status,
         count: Number(r.count),
+      })),
+      rollouts: rollouts.rows.map((r) => ({
+        finishedAt: r.finished_at,
+        kind: typeof r.result?.kind === "string" ? r.result.kind : "unknown",
+        targeted: typeof r.result?.targeted === "number" ? r.result.targeted : null,
+        enqueued: typeof r.result?.enqueued === "number" ? r.result.enqueued : null,
+        skipped: Array.isArray(r.result?.skipped) ? r.result.skipped : [],
       })),
       failures: failures.rows.map((r) => ({
         workflow: r.workflow,
@@ -158,7 +219,30 @@ function ago(at: Date | null): string {
 export function render(status: PipelineStatus): string {
   const out: string[] = [];
 
-  out.push("Watched packages");
+  const e = status.enrolment;
+  out.push("Enrolment");
+  if (e.repositories === 0) {
+    // The state a rollout targeting nothing almost always turns out to be.
+    // Enrolment rides on `installation.created`, which GitHub sends only at
+    // install time — so an App installed before DEFAULT_PROVIDER_SLUG was set
+    // never enrolled, and reinstalling is the only way to get that event again.
+    out.push(
+      "  no repositories — nothing to roll out to.",
+      "  Enrolment happens on installation.created, which GitHub sends only at",
+      "  install time. If the App was installed before DEFAULT_PROVIDER_SLUG was",
+      "  set, reinstall it.",
+    );
+  } else {
+    const suspended =
+      e.suspendedInstallations > 0 ? `, ${e.suspendedInstallations} suspended` : "";
+    const archived = e.archivedRepositories > 0 ? `, ${e.archivedRepositories} archived` : "";
+    out.push(
+      `  ${e.consumers} consumer(s), ${e.installations} installation(s)${suspended}, ` +
+        `${e.repositories} repository(ies)${archived}`,
+    );
+  }
+
+  out.push("", "Watched packages");
   if (status.watched.length === 0) {
     out.push("  (none — nothing to detect; see `pnpm db:watch`)");
   }
@@ -192,6 +276,28 @@ export function render(status: PipelineStatus): string {
   }
   for (const j of status.jobs) {
     out.push(`  ${j.workflow.padEnd(20)} ${j.status.padEnd(10)} ${j.count}`);
+  }
+
+  if (status.rollouts.length > 0) {
+    out.push("", "Rollouts");
+    for (const r of status.rollouts) {
+      const counts =
+        r.targeted === null
+          ? ""
+          : `  targeted ${r.targeted}, enqueued ${r.enqueued ?? 0}`;
+      out.push(`  ${r.kind}${counts}  (${ago(r.finishedAt)})`);
+      if (r.kind === "planned" && r.targeted === 0 && r.skipped.length === 0) {
+        // Distinguishes "no repositories at all" from "repositories, all
+        // filtered". They read identically in a count and have different fixes.
+        out.push("    no candidate repositories — see Enrolment above");
+      }
+      for (const skip of r.skipped.slice(0, 10)) {
+        out.push(`    skipped ${skip.owner}/${skip.name}: ${skip.reason}`);
+      }
+      if (r.skipped.length > 10) {
+        out.push(`    … and ${r.skipped.length - 10} more skipped`);
+      }
+    }
   }
 
   if (status.failures.length > 0) {
