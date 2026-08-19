@@ -406,11 +406,19 @@ export function createRolloutDeps(deps: WiringDeps): RolloutDeps {
     /**
      * Reads one candidate's manifest at the head of its default branch.
      *
-     * Every failure returns null rather than throwing, and that asymmetry is
-     * the point: a rollout inspects hundreds of repositories, and one of them
-     * having a revoked installation, an empty default branch, or no manifest
-     * at all must cost that repository its migration and nothing else. The
-     * reason is logged so a skip is visible rather than silent.
+     * Every failure returns a reason rather than throwing, and that asymmetry
+     * is the point: a rollout inspects hundreds of repositories, and one of
+     * them having a revoked installation, an empty default branch, or no
+     * manifest at all must cost that repository its migration and nothing
+     * else.
+     *
+     * The reason is returned and not merely logged. These once all became the
+     * same null and `plan-rollout` reported all of them as "manifest could not
+     * be read" — which said a fleet of Python repositories was unreadable when
+     * the truth was that they are not npm packages and never had a
+     * `package.json` to read. One of those two states needs fixing and the
+     * other is the system working; a skip that cannot tell them apart sends
+     * whoever reads it looking for the wrong bug.
      */
     async readManifest(repository, providerId) {
       const coord = { owner: repository.forgeOwner, name: repository.forgeName };
@@ -430,7 +438,9 @@ export function createRolloutDeps(deps: WiringDeps): RolloutDeps {
         // reading the wrong one produces a repository that looks like it has
         // no manifest — a skip nobody investigates.
         const described = await deps.contents.describe(token, coord);
-        if (!described) return null;
+        if (!described) {
+          return { unreadable: "repository not visible to the installation" };
+        }
         await refreshRepositoryShape(deps.db, providerId, repository.repositoryId, described);
 
         if (described.archived || described.fork) {
@@ -441,11 +451,15 @@ export function createRolloutDeps(deps: WiringDeps): RolloutDeps {
             repository: `${coord.owner}/${coord.name}`,
             reason: described.archived ? "archived" : "fork",
           });
-          return null;
+          return { unreadable: described.archived ? "archived" : "fork" };
         }
 
         const snapshot = await deps.contents.snapshot(token, coord, described.defaultBranch);
-        if (!snapshot) return null;
+        if (!snapshot) {
+          return {
+            unreadable: `default branch ${described.defaultBranch} has no commits`,
+          };
+        }
 
         const manifest = await deps.contents.readPath(
           token,
@@ -455,8 +469,11 @@ export function createRolloutDeps(deps: WiringDeps): RolloutDeps {
           MANIFEST_MAX_BYTES,
         );
         // No manifest is not a failure to read — it is a repository that is
-        // not an npm package. `plan-rollout` records it as a skip either way.
-        if (manifest === null) return null;
+        // not an npm package. Still a skip, but a skip that needs no fixing,
+        // and it is by far the most common one in a mixed-language account.
+        if (manifest === null) {
+          return { unreadable: `no ${MANIFEST_PATH} at ${described.defaultBranch}` };
+        }
 
         // A lockfile only sharpens the assessment; its absence costs evidence,
         // not correctness. Lockfiles are also routinely megabytes, so they get
@@ -482,13 +499,15 @@ export function createRolloutDeps(deps: WiringDeps): RolloutDeps {
           ...(lockfile !== undefined && { lockfile }),
         };
       } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
         log("rollout.manifest_unreadable", {
           repository: `${coord.owner}/${coord.name}`,
           // The message is already redacted at the ForgeError boundary; a
-          // token cannot reach a log through here.
-          error: error instanceof Error ? error.message : String(error),
+          // token cannot reach a log through here — which is also why it is
+          // safe to return it as the skip reason.
+          error: message,
         });
-        return null;
+        return { unreadable: `read failed: ${message}` };
       }
     },
 

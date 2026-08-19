@@ -372,7 +372,9 @@ describe("rollout dependencies", () => {
       tenant.providerId,
     );
 
-    expect(manifest).toBeNull();
+    // The credential failure is named, not flattened. It is the one skip in
+    // this set that is our misconfiguration rather than the repository's shape.
+    expect(manifest).toMatchObject({ unreadable: expect.stringContaining("read failed") });
   });
 
   it("reads the branch the repository actually defaults to, not the one we assumed", async () => {
@@ -426,7 +428,8 @@ describe("rollout dependencies", () => {
       tenant.providerId,
     );
 
-    expect(manifest?.manifest).toBe('{"name":"w"}');
+    expect(manifest).not.toHaveProperty("unreadable");
+    expect(manifest).toMatchObject({ manifest: '{"name":"w"}' });
 
     // And the correction is cached, so the next rollout does not rediscover it.
     const row = await db.withTenant(tenant.providerId, async (client) => {
@@ -470,7 +473,7 @@ describe("rollout dependencies", () => {
       tenant.providerId,
     );
 
-    expect(manifest).toBeNull();
+    expect(manifest).toMatchObject({ unreadable: "fork" });
   });
 
   it("enqueues a migration carrying the impact the planner computed", async () => {

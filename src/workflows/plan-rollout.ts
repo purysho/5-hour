@@ -123,13 +123,18 @@ export interface RolloutDeps {
   /**
    * Reads a repository's manifest and lockfile.
    *
-   * Returns null when the repository cannot be read. Null costs a candidate;
-   * a fabricated manifest would cost a maintainer's trust.
+   * Returns why on failure rather than a bare null. Not reading a repository
+   * costs it a candidacy; a fabricated manifest would cost a maintainer's
+   * trust — but the two reasons a read fails are not the same fact. A
+   * repository with no `package.json` is not an npm package and was never
+   * going to be targeted, while one we could not authenticate to is a
+   * misconfiguration on our side. Collapsing them reported an entire fleet as
+   * unreadable when most of it was simply written in another language.
    */
   readonly readManifest: (
     repository: CandidateRepository,
     providerId: string,
-  ) => Promise<RepositoryManifest | null>;
+  ) => Promise<RepositoryManifest | { readonly unreadable: string }>;
   /**
    * Enqueues one migration. Must be idempotent on the dedupe key — this
    * workflow's step boundary can replay, and a duplicate here is a duplicate
@@ -268,11 +273,11 @@ export function planRolloutWorkflow(deps: RolloutDeps) {
 
       for (const repository of candidates) {
         const manifest = await deps.readManifest(repository, ctx.providerId);
-        if (!manifest) {
+        if ("unreadable" in manifest) {
           skipped.push({
             owner: repository.forgeOwner,
             name: repository.forgeName,
-            reason: "manifest could not be read",
+            reason: manifest.unreadable,
           });
           continue;
         }

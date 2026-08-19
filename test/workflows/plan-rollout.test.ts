@@ -226,15 +226,41 @@ describe("choosing who to contact", () => {
     expect(outcome).toMatchObject({ kind: "planned", targeted: 0 });
   });
 
-  it("skips a repository whose manifest cannot be read, and says so", async () => {
-    const { deps, enqueued } = buildDeps({ readManifest: async () => null });
+  it("records the reason a manifest could not be read, not just that it was not", async () => {
+    // The reason comes from the reader and is recorded verbatim. A repository
+    // with no package.json and one we cannot authenticate to are both skips,
+    // and only one of them is a bug — reporting a single "could not be read"
+    // for both sent whoever read the rollout looking for the wrong thing.
+    const { deps, enqueued } = buildDeps({
+      readManifest: async () => ({ unreadable: "no package.json at main" }),
+    });
 
     const outcome = await run(deps);
 
     expect(enqueued).toHaveLength(0);
     expect(outcome).toMatchObject({
       kind: "planned",
-      skipped: [{ owner: "acme", name: "widgets-1", reason: "manifest could not be read" }],
+      skipped: [{ owner: "acme", name: "widgets-1", reason: "no package.json at main" }],
+    });
+  });
+
+  it("distinguishes an unauthenticated repository from one that is not a package", async () => {
+    const { deps } = buildDeps({
+      candidates: async () => [repo(1), repo(2)],
+      readManifest: async (repository) =>
+        repository.forgeName === "widgets-1"
+          ? { unreadable: "repository not visible to the installation" }
+          : { unreadable: "no package.json at main" },
+    });
+
+    const outcome = await run(deps);
+
+    expect(outcome).toMatchObject({
+      kind: "planned",
+      skipped: [
+        { name: "widgets-1", reason: "repository not visible to the installation" },
+        { name: "widgets-2", reason: "no package.json at main" },
+      ],
     });
   });
 
