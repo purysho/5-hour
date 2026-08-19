@@ -67,6 +67,18 @@ export interface RawWebhook {
  * is safer than a default branch that tries.
  */
 export type ForgeEvent =
+  | {
+      /**
+       * A new installation, and the only event that carries the installing
+       * account. Kept distinct from `repositories.added` because enrolment
+       * needs that account to record who we are acting for — collapsing the
+       * two, as this once did, discards it.
+       */
+      readonly type: "installation.created";
+      readonly installationId: number;
+      readonly account: string;
+      readonly repositories: readonly AddedRepository[];
+    }
   | { readonly type: "installation.revoked"; readonly installationId: number }
   | { readonly type: "installation.suspended"; readonly installationId: number }
   | { readonly type: "installation.unsuspended"; readonly installationId: number }
@@ -225,12 +237,16 @@ function interpret(eventType: string, payload: unknown): WebhookOutcome {
         };
       case "created": {
         // The first event of a customer's life. Without it there is no
-        // repository row, and every later stage has nothing to act on.
+        // installation row and no repository row, and every later stage has
+        // nothing to act on.
         const repositories = readAddedRepositories(body["repositories"]);
-        if (repositories === null) return { kind: "rejected", reason: "unexpected-shape" };
+        const account = readAccountLogin(body["installation"]);
+        if (repositories === null || account === null) {
+          return { kind: "rejected", reason: "unexpected-shape" };
+        }
         return {
           kind: "accepted",
-          event: { type: "repositories.added", installationId, repositories },
+          event: { type: "installation.created", installationId, account, repositories },
         };
       }
       default:
@@ -309,6 +325,21 @@ function readInstallationId(body: Record<string, unknown>): number | null {
   if (typeof installation !== "object" || installation === null) return null;
   const id = (installation as Record<string, unknown>)["id"];
   return typeof id === "number" && Number.isSafeInteger(id) && id > 0 ? id : null;
+}
+
+/**
+ * The account an App was installed on.
+ *
+ * Lower-cased to match `readRepository`, because the two are compared against
+ * the same stored columns and GitHub does not preserve case consistently
+ * between payloads.
+ */
+function readAccountLogin(installation: unknown): string | null {
+  if (typeof installation !== "object" || installation === null) return null;
+  const account = (installation as Record<string, unknown>)["account"];
+  if (typeof account !== "object" || account === null) return null;
+  const login = (account as Record<string, unknown>)["login"];
+  return typeof login === "string" && login.length > 0 ? login.toLowerCase() : null;
 }
 
 function readRepository(value: unknown): RepositoryRef | null {

@@ -60,6 +60,7 @@ validates and then throws rather than starting half-configured:
 | `GITHUB_WEBHOOK_SECRET` | **at least 32 characters** |
 | `PUBLIC_ORIGIN` | must be `https` when `NODE_ENV=production` |
 | `GITHUB_SIGNING_KEY_ID` **or** `GITHUB_PRIVATE_KEY_FILE` | exactly one, never both (ADR-0002 §2, ADR-0012) |
+| `DEFAULT_PROVIDER_SLUG` | optional; **required to onboard anyone in a single-tenant deployment** — see Enrolment |
 
 `PORT` is injected by Railway and honoured; the default is 8080 otherwise. The
 worker additionally wants `ANTHROPIC_API_KEY` — without it `migrate-repository`
@@ -73,6 +74,42 @@ deploy, and after any deploy that adds a migration. It is deliberately not wired
 to `preDeployCommand`: the migrations create roles and RLS policies, and a schema
 change that runs automatically on every push is one nobody reviewed. Add it there
 yourself if you would rather trade that review for the convenience.
+
+### Enrolment
+
+Installing the GitHub App is not enough to onboard anyone, and the failure is
+quiet: webhooks arrive, verify, and resolve to no tenant, so the pipeline has
+nothing to act on and nothing errors. The log line is
+
+```
+webhook applied  event: push  applied: false  detail: no installation matching forge id 154772267
+```
+
+The missing fact is one GitHub never sends. A webhook says which *account*
+installed the App; it cannot say which **provider** — the paying tenant, and the
+RLS boundary from ADR-0005 — that installation belongs to. Guessing is not
+available: a wrong guess files one customer's repositories under another, which
+is the boundary migration 001 exists to defend. So the provider is named
+explicitly, once:
+
+```bash
+# 1. Create the provider (needs the same connection as db:migrate — the
+#    RLS policy on `provider` makes this impossible for the app role, by design)
+pnpm db:provider acme "Acme Inc"
+
+# 2. Point the deployment at it, on BOTH services
+DEFAULT_PROVIDER_SLUG=acme
+```
+
+With that set, an `installation.created` webhook for an unknown installation
+enrols itself: the consumer, the installation, and its repositories are written
+in one transaction. Leave `DEFAULT_PROVIDER_SLUG` unset and unknown
+installations stay unenrolled — the correct behaviour for a multi-tenant
+deployment, where the answer has to come from a signup flow instead.
+
+If the App was already installed before the provider existed, **reinstall it**
+after setting the variable. Enrolment rides on `installation.created`, and
+GitHub only sends that at install time.
 
 ## Prerequisites
 

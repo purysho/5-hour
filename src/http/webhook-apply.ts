@@ -41,6 +41,15 @@ export interface ApplyDeps {
   ) => Promise<T>;
   /** Resolves a forge installation id to its provider. Minimal disclosure. */
   readonly providerForInstallation: (forgeInstallationId: number) => Promise<string | null>;
+  /**
+   * The provider a brand-new installation enrols into, or null.
+   *
+   * Absent on purpose in a multi-tenant deployment: GitHub tells us which
+   * account installed the App and never which paying tenant that belongs to,
+   * so with no answer configured the only safe move is to record nothing.
+   * Omitting it preserves exactly the behaviour that existed before enrolment.
+   */
+  readonly defaultProvider?: () => Promise<string | null>;
 }
 
 export async function applyForgeEvent(
@@ -50,9 +59,13 @@ export async function applyForgeEvent(
   const providerId = await deps.providerForInstallation(event.installationId);
 
   if (!providerId) {
-    // An event for an installation we do not know about. Common and benign —
-    // a stale delivery after a tenant was deleted, or an app installed and
-    // removed before we recorded it. Not an error.
+    // `installation.created` is the one event that can create what is missing,
+    // and the only one that carries the account needed to do it.
+    if (event.type === "installation.created") return enrol(event, deps);
+
+    // Any other event for an installation we do not know about. Common and
+    // benign — a stale delivery after a tenant was deleted, or an app
+    // installed and removed before we recorded it. Not an error.
     return {
       applied: false,
       detail: `no installation matching forge id ${event.installationId}`,
@@ -62,6 +75,12 @@ export async function applyForgeEvent(
 
   return deps.withTenant(providerId, async (client) => {
     switch (event.type) {
+      case "installation.created":
+        // A known id installing again. GitHub reuses the id when an App is
+        // re-installed on the same account, so this is the customer coming
+        // back: clear the suspension the uninstall wrote, and re-record the
+        // grant.
+        return reinstate(client, providerId, event);
       case "installation.revoked":
         return revoke(client, event.installationId, "revoked");
       case "installation.suspended":
@@ -82,6 +101,102 @@ export async function applyForgeEvent(
         };
     }
   });
+}
+
+/**
+ * Records an installation we have never seen before.
+ *
+ * The consumer, the installation and its repositories are written in one
+ * transaction because a partial enrolment is worse than none: an installation
+ * row with no repositories is a tenant the pipeline will happily iterate over
+ * and never act on, and it looks healthy from every direction.
+ *
+ * Both inserts are idempotent. GitHub retries deliveries, and the delivery
+ * claim in migration 006 stops a replay reaching here at all — but a
+ * re-install after an uninstall legitimately arrives with the same account and
+ * a new installation id, and that must land on the existing consumer rather
+ * than raising on its unique constraint.
+ */
+async function enrol(
+  event: Extract<ForgeEvent, { type: "installation.created" }>,
+  deps: ApplyDeps,
+): Promise<ApplyResult> {
+  const providerId = deps.defaultProvider ? await deps.defaultProvider() : null;
+
+  if (!providerId) {
+    // Nothing to enrol into. Reported rather than swallowed: for a
+    // single-tenant deployment this is the misconfiguration that makes the
+    // whole system silently inert, and it is worth finding in a log.
+    return {
+      applied: false,
+      detail:
+        `installation ${event.installationId} for ${event.account} is not enrolled ` +
+        `and no default provider is configured (DEFAULT_PROVIDER_SLUG)`,
+      auditAction: null,
+    };
+  }
+
+  return deps.withTenant(providerId, async (client) => {
+    const { rows } = await client.query<{ id: string }>(
+      `INSERT INTO consumer (provider_id, forge, forge_owner)
+            VALUES ($1, 'github', $2)
+       ON CONFLICT (provider_id, forge, forge_owner)
+       DO UPDATE SET forge_owner = EXCLUDED.forge_owner
+         RETURNING id`,
+      [providerId, event.account],
+    );
+    const consumerId = rows[0]?.id;
+    if (!consumerId) {
+      // RLS returning nothing here would mean the provider id we were handed
+      // is not one this connection may write as. Failing loudly beats
+      // recording an installation against no consumer.
+      throw new Error(`could not record consumer ${event.account}`);
+    }
+
+    await client.query(
+      `INSERT INTO installation (provider_id, consumer_id, forge_installation_id)
+            VALUES ($1, $2, $3)
+       ON CONFLICT (provider_id, forge_installation_id)
+       DO UPDATE SET consumer_id = EXCLUDED.consumer_id, suspended_at = NULL`,
+      [providerId, consumerId, event.installationId],
+    );
+
+    const added = await addRepositories(
+      client,
+      providerId,
+      event.installationId,
+      event.repositories,
+    );
+
+    return {
+      applied: true,
+      detail: `enrolled installation ${event.installationId} for ${event.account}; ${added.detail}`,
+      auditAction: "installation.enrolled",
+    };
+  });
+}
+
+/** A known installation installing again. See the call site for why. */
+async function reinstate(
+  client: TenantClient,
+  providerId: string,
+  event: Extract<ForgeEvent, { type: "installation.created" }>,
+): Promise<ApplyResult> {
+  await client.query(
+    `UPDATE installation SET suspended_at = NULL WHERE forge_installation_id = $1`,
+    [event.installationId],
+  );
+  const added = await addRepositories(
+    client,
+    providerId,
+    event.installationId,
+    event.repositories,
+  );
+  return {
+    applied: true,
+    detail: `installation ${event.installationId} reinstated; ${added.detail}`,
+    auditAction: "installation.reinstated",
+  };
 }
 
 async function revoke(

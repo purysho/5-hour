@@ -493,3 +493,110 @@ describe("delivery claims", () => {
     expect(columns).toEqual(["delivery_id", "event_type", "outcome", "received_at"]);
   });
 });
+
+/**
+ * Enrolment.
+ *
+ * These cover the gap that made the whole system inert: nothing outside the
+ * test suite ever created an installation row, so every webhook resolved to no
+ * tenant and the pipeline had nothing to act on — indefinitely, and without
+ * erroring anywhere.
+ */
+describe("enrolment", () => {
+  function created(installationId: number, account: string): ForgeEvent {
+    return {
+      type: "installation.created",
+      installationId,
+      account,
+      repositories: [
+        { owner: account, name: "widgets", forgeRepositoryId: 9001, isPrivate: false },
+      ],
+    };
+  }
+
+  /** A forge id no fixture has taken. */
+  function freshForgeId(): number {
+    return Math.floor(Math.random() * 1e12) + 1;
+  }
+
+  it("records the installation, its consumer and its repositories", async () => {
+    const fixture = await seedProvider("wh-enrol");
+    const installationId = freshForgeId();
+
+    const result = await applyForgeEvent(created(installationId, "enrol-co"), {
+      ...deps(),
+      defaultProvider: async () => fixture.providerId,
+    });
+
+    expect(result.applied).toBe(true);
+
+    const found = await db.withTenant(fixture.providerId, async (client) => {
+      const { rows } = await client.query<{ forge_owner: string; forge_name: string }>(
+        `SELECT r.forge_owner, r.forge_name
+           FROM repository r
+           JOIN installation i ON i.id = r.installation_id
+          WHERE i.forge_installation_id = $1`,
+        [installationId],
+      );
+      return rows;
+    });
+    expect(found).toEqual([{ forge_owner: "enrol-co", forge_name: "widgets" }]);
+  });
+
+  it("does not enrol when no provider is configured", async () => {
+    // The multi-tenant default. GitHub never says which paying tenant an
+    // installation belongs to, so with no answer configured, guessing would
+    // file one customer's repositories under another.
+    const result = await applyForgeEvent(created(freshForgeId(), "stranger"), deps());
+
+    expect(result.applied).toBe(false);
+    expect(result.detail).toContain("DEFAULT_PROVIDER_SLUG");
+  });
+
+  it("does not enrol when the configured provider does not exist", async () => {
+    const result = await applyForgeEvent(created(freshForgeId(), "stranger"), {
+      ...deps(),
+      defaultProvider: async () => null,
+    });
+
+    expect(result.applied).toBe(false);
+  });
+
+  it("survives the same account installing twice", async () => {
+    // A re-install after an uninstall arrives with the same account and a new
+    // installation id. It must land on the existing consumer rather than
+    // raising on its unique constraint.
+    const fixture = await seedProvider("wh-enrol-twice");
+    const enrolDeps = { ...deps(), defaultProvider: async () => fixture.providerId };
+
+    const first = await applyForgeEvent(created(freshForgeId(), "repeat-co"), enrolDeps);
+    const second = await applyForgeEvent(created(freshForgeId(), "repeat-co"), enrolDeps);
+
+    expect(first.applied).toBe(true);
+    expect(second.applied).toBe(true);
+
+    const consumers = await db.withTenant(fixture.providerId, async (client) => {
+      const { rowCount } = await client.query(
+        "SELECT 1 FROM consumer WHERE forge_owner = $1",
+        ["repeat-co"],
+      );
+      return rowCount;
+    });
+    expect(consumers).toBe(1);
+  });
+
+  it("clears the suspension when a known installation reinstalls", async () => {
+    // Uninstalling wrote suspended_at. Coming back must undo it, or the
+    // customer reinstalls and nothing ever runs again.
+    const fixture = await seedProvider("wh-reinstall");
+    const installationId = await forgeIdFor(fixture);
+
+    await applyForgeEvent({ type: "installation.revoked", installationId }, deps());
+    expect(await suspendedAt(fixture)).not.toBeNull();
+
+    const result = await applyForgeEvent(created(installationId, fixture.slug), deps());
+
+    expect(result.applied).toBe(true);
+    expect(await suspendedAt(fixture)).toBeNull();
+  });
+});

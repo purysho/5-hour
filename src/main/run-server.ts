@@ -18,6 +18,10 @@ const db = new Database({
   platformConnectionString: Secret.reveal(config.platformDatabaseUrl),
 });
 
+// Narrowed once, here, so the closure below captures a `string` rather than
+// re-asserting the union at every use.
+const defaultProviderSlug = config.defaultProviderSlug;
+
 let draining = false;
 
 function log(message: string, fields: Record<string, unknown> = {}): void {
@@ -68,6 +72,23 @@ const server = createHttpServer({
 
   apply: {
     withTenant: (providerId, fn) => db.withTenant(providerId, fn),
+    // Present only when a provider is configured, so that "no enrolment" stays
+    // a shape the type system can see rather than a null checked at runtime.
+    ...(defaultProviderSlug === null
+      ? {}
+      : {
+          defaultProvider: async () => {
+            const rows = await db.withPlatformContext("enrolment provider lookup", (client) =>
+              client
+                .query<{ provider_id: string | null }>(
+                  "SELECT provider_id_for_slug($1) AS provider_id",
+                  [defaultProviderSlug],
+                )
+                .then((r) => r.rows),
+            );
+            return rows[0]?.provider_id ?? null;
+          },
+        }),
     providerForInstallation: async (forgeInstallationId) => {
       const rows = await db.withPlatformContext("installation lookup", (client) =>
         client

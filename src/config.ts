@@ -86,6 +86,17 @@ export interface Config {
    * `migrate-repository` rather than dequeuing jobs it cannot finish.
    */
   readonly anthropic: { readonly apiKey: Secret | null };
+  /**
+   * The provider new installations enrol into (migration 011).
+   *
+   * A webhook says which account installed the App, never which paying tenant
+   * that installation belongs to. A single-tenant deployment answers that here
+   * and installations enrol automatically; leaving it unset keeps the
+   * multi-tenant behaviour, where an unrecognised installation is recorded and
+   * otherwise ignored. Null rather than a default on purpose — a default would
+   * silently file one customer's repositories under another.
+   */
+  readonly defaultProviderSlug: string | null;
   readonly http: {
     readonly port: number;
     /** Public origin, used to build opt-out links. */
@@ -211,6 +222,16 @@ export function loadConfig(env: Env = process.env): Config {
     problems.push("ANTHROPIC_API_KEY looks truncated");
   }
 
+  // Slugs land in a lookup and in log lines; the shape is checked here so a
+  // typo fails the deploy rather than quietly matching no provider.
+  const defaultProviderSlug = env["DEFAULT_PROVIDER_SLUG"]?.trim() || null;
+  if (defaultProviderSlug !== null && !/^[a-z0-9][a-z0-9-]{0,62}$/.test(defaultProviderSlug)) {
+    problems.push(
+      "DEFAULT_PROVIDER_SLUG must be lowercase alphanumeric with hyphens, " +
+        "and must match a provider created with `pnpm db:provider`",
+    );
+  }
+
   const port = number_("PORT", 8080, 1, 65535);
   const concurrency = number_("WORKER_CONCURRENCY", 4, 1, 64);
   const pollIntervalMs = number_("WORKER_POLL_INTERVAL_MS", 1000, 100, 60_000);
@@ -235,6 +256,7 @@ export function loadConfig(env: Env = process.env): Config {
     anthropic: {
       apiKey: anthropicKey ? new Secret(anthropicKey, "ANTHROPIC_API_KEY") : null,
     },
+    defaultProviderSlug,
     http: {
       port,
       publicOrigin: publicOrigin.replace(/\/+$/, ""),

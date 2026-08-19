@@ -56,7 +56,9 @@ function deps(seen: Set<string> = new Set()): WebhookDeps {
   };
 }
 
-const INSTALLATION = { id: 12345 };
+// Carries the account, as every real installation payload does. Enrolment
+// reads it to record whose repositories we have been given.
+const INSTALLATION = { id: 12345, account: { login: "acme" } };
 
 function rejection(outcome: WebhookOutcome): string {
   return outcome.kind === "rejected" ? outcome.reason : `not-rejected(${outcome.kind})`;
@@ -359,7 +361,7 @@ describe("authenticated but malformed", () => {
   });
 
   it("ignores event types we have no business reacting to", async () => {
-    for (const event of ["star", "watch", "push", "issues", "fork"]) {
+    for (const event of ["star", "watch", "issues", "fork"]) {
       const outcome = await handleWebhook(
         deliver({ action: "created", installation: INSTALLATION }, {
           event,
@@ -409,7 +411,10 @@ describe("repositories granted", () => {
     });
   });
 
-  it("reads the repositories carried on a fresh installation", async () => {
+  it("reads the account and repositories carried on a fresh installation", async () => {
+    // The account is the half that used to be discarded. Without it there is
+    // nothing to enrol the installation under, which is why this is its own
+    // event type rather than a repositories.added.
     const outcome = await handleWebhook(
       deliver({
         action: "created",
@@ -419,7 +424,29 @@ describe("repositories granted", () => {
       deps(),
     );
 
-    expect(outcome.kind === "accepted" && outcome.event.type).toBe("repositories.added");
+    expect(outcome.kind === "accepted" && outcome.event).toEqual({
+      type: "installation.created",
+      installationId: 12345,
+      account: "acme",
+      repositories: [
+        { owner: "acme", name: "one", forgeRepositoryId: 1, isPrivate: true },
+      ],
+    });
+  });
+
+  it("rejects a fresh installation carrying no account", async () => {
+    // Not a shape GitHub sends. Accepting it would record repositories under
+    // an installation we cannot attribute to anyone.
+    const outcome = await handleWebhook(
+      deliver({
+        action: "created",
+        installation: { id: 12345 },
+        repositories: [{ id: 1, full_name: "acme/one", private: true }],
+      }),
+      deps(),
+    );
+
+    expect(rejection(outcome)).toBe("unexpected-shape");
   });
 
   it("drops an entry with no numeric id rather than the whole grant", async () => {
@@ -464,5 +491,40 @@ describe("repositories granted", () => {
     expect(outcome.kind === "accepted" && outcome.event).toMatchObject({
       repositories: [{ isPrivate: true }],
     });
+  });
+});
+
+describe("pushes", () => {
+  it("accepts a push with the repository and ref it touched", async () => {
+    const outcome = await handleWebhook(
+      deliver(
+        {
+          installation: INSTALLATION,
+          ref: "refs/heads/main",
+          repository: { id: 5, full_name: "acme/widgets" },
+        },
+        { event: "push" },
+      ),
+      deps(),
+    );
+
+    expect(outcome.kind === "accepted" && outcome.event).toEqual({
+      type: "push",
+      installationId: 12345,
+      repository: { owner: "acme", name: "widgets" },
+      ref: "refs/heads/main",
+    });
+  });
+
+  it("rejects a push with no ref", async () => {
+    const outcome = await handleWebhook(
+      deliver(
+        { installation: INSTALLATION, repository: { id: 5, full_name: "acme/widgets" } },
+        { event: "push" },
+      ),
+      deps(),
+    );
+
+    expect(rejection(outcome)).toBe("unexpected-shape");
   });
 });
