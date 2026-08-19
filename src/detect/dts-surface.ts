@@ -70,7 +70,13 @@ export interface ExtractOptions {
   readonly maxSymbols?: number;
 }
 
-const DEFAULT_MAX_TOTAL_BYTES = 4_000_000;
+// Raised from 4MB after the live registry rejected it as too tight: the
+// stripe package publishes 12.6MB of declarations, and a ceiling that refuses
+// the largest real SDKs bounds nothing an attacker cares about while making
+// the tool useless on exactly the packages worth watching. The bound is still
+// here — it is a denial-of-service guard, not a correctness one — just set
+// above what legitimate publishers actually ship.
+const DEFAULT_MAX_TOTAL_BYTES = 32_000_000;
 const DEFAULT_MAX_FILES = 500;
 const DEFAULT_MAX_SYMBOLS = 5_000;
 

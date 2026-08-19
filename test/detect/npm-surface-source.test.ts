@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { gzipSync } from "node:zlib";
 import {
+  definitelyTypedName,
   NpmSurfaceSource,
   resolveTypesEntry,
   type BinaryHttpClient,
@@ -294,5 +295,121 @@ describe("resolveTypesEntry", () => {
       ["index.d.ts", buf("export {};")],
     ]);
     expect(resolveTypesEntry(files)).toBe("index.d.ts");
+  });
+});
+
+/**
+ * Falling back to DefinitelyTyped.
+ *
+ * A package that ships no declarations of its own is not untyped. For a large
+ * share of npm — react, express, lodash — the types live in a separate
+ * `@types` package, and treating that as untyped costs the surface
+ * corroboration on exactly the packages most likely to be depended on.
+ * Verified against the live registry: react ships none.
+ */
+describe("packages whose types live in @types", () => {
+  const UNTYPED = { "package.json": JSON.stringify({ name: "widget" }) };
+  const TYPES = {
+    "package.json": JSON.stringify({ name: "@types/widget", types: "index.d.ts" }),
+    "index.d.ts": `export declare function render(node: string): void;`,
+  };
+
+  /** Serves a different packument and tarball per package name. */
+  function registry(typesVersions: readonly string[]) {
+    const http: HttpClient = {
+      async get(url) {
+        if (url.includes("@types")) {
+          return {
+            status: 200,
+            body: JSON.stringify({
+              name: "@types/widget",
+              versions: Object.fromEntries(
+                typesVersions.map((v) => [
+                  v,
+                  { version: v, dist: { tarball: `https://registry.npmjs.org/@types/widget/-/w-${v}.tgz` } },
+                ]),
+              ),
+            }),
+          };
+        }
+        return {
+          status: 200,
+          body: JSON.stringify({
+            name: "widget",
+            versions: { "2.1.0": { version: "2.1.0", dist: { tarball: TARBALL_URL } } },
+          }),
+        };
+      },
+    };
+    const binaryHttp: BinaryHttpClient = {
+      async get(url) {
+        return { status: 200, body: url.includes("@types") ? tarball(TYPES) : tarball(UNTYPED) };
+      },
+    };
+    return new NpmSurfaceSource(new NpmCollector(http), binaryHttp);
+  }
+
+  it("reads the surface from @types when the package ships none", async () => {
+    const surface = await registry(["2.0.9", "2.1.4"]).surfaceFor("widget", "2.1.0");
+
+    expect(surface?.symbols.map((s) => s.name)).toEqual(["render"]);
+  });
+
+  it("labels the surface with the runtime package, not @types", async () => {
+    // Downstream diffs two surfaces against each other. One labelled
+    // `@types/widget` would describe the wrong pair of things.
+    const surface = await registry(["2.1.4"]).surfaceFor("widget", "2.1.0");
+
+    expect(surface).toMatchObject({ packageName: "widget", version: "2.1.0" });
+  });
+
+  it("matches the major, and takes the highest within it", async () => {
+    // DefinitelyTyped tracks the major of what it describes. Diffing against a
+    // different major produces confident and entirely wrong impacted symbols.
+    // A surface comes back at all only when a major matched: the 1.x and 3.x
+    // entries alone would resolve to nothing.
+    const surface = await registry(["1.9.9", "2.0.1", "2.4.7", "3.0.0"])
+      .surfaceFor("widget", "2.1.0");
+
+    expect(surface?.symbols).toHaveLength(1);
+  });
+
+  it("returns null when no @types package exists", async () => {
+    const http: HttpClient = {
+      async get(url) {
+        if (url.includes("@types")) return { status: 404, body: "not found" };
+        return {
+          status: 200,
+          body: JSON.stringify({
+            name: "widget",
+            versions: { "2.1.0": { version: "2.1.0", dist: { tarball: TARBALL_URL } } },
+          }),
+        };
+      },
+    };
+    const source = new NpmSurfaceSource(new NpmCollector(http), {
+      async get() { return { status: 200, body: tarball(UNTYPED) }; },
+    });
+
+    expect(await source.surfaceFor("widget", "2.1.0")).toBeNull();
+  });
+
+  it("returns null when @types has nothing for that major", async () => {
+    expect(await registry(["1.0.0", "3.0.0"]).surfaceFor("widget", "2.1.0")).toBeNull();
+  });
+});
+
+describe("definitelyTypedName", () => {
+  it("maps an unscoped package", () => {
+    expect(definitelyTypedName("react")).toBe("@types/react");
+  });
+
+  it("flattens a scope with a double underscore, as DefinitelyTyped does", () => {
+    // npm scopes cannot nest, which is why the convention exists.
+    expect(definitelyTypedName("@babel/core")).toBe("@types/babel__core");
+  });
+
+  it("leaves an @types package alone", () => {
+    expect(definitelyTypedName("@types/react")).toBe("@types/react");
   });
 });

@@ -27,6 +27,7 @@
 import type { ApiSurface } from "./api-surface.ts";
 import { extractApiSurface } from "./dts-surface.ts";
 import type { NpmCollector } from "./npm.ts";
+import { compareVersions, tryParseVersion, type Version } from "./semver.ts";
 import { readTarball } from "./tarball.ts";
 
 export interface BinaryHttpClient {
@@ -55,6 +56,21 @@ function wanted(path: string): boolean {
   return path === "package.json" || path.endsWith(".d.ts") || path.endsWith(".d.mts");
 }
 
+/**
+ * The DefinitelyTyped package name for a runtime package.
+ *
+ * Scoped packages flatten with a double underscore — `@scope/name` is
+ * described by `@types/scope__name` — which is the convention DefinitelyTyped
+ * uses because npm scopes cannot nest.
+ */
+export function definitelyTypedName(packageName: string): string {
+  if (packageName.startsWith("@types/")) return packageName;
+  if (packageName.startsWith("@")) {
+    return `@types/${packageName.slice(1).replace("/", "__")}`;
+  }
+  return `@types/${packageName}`;
+}
+
 export class NpmSurfaceSource {
   readonly #collector: NpmCollector;
   readonly #http: BinaryHttpClient;
@@ -75,6 +91,74 @@ export class NpmSurfaceSource {
   }
 
   async surfaceFor(packageName: string, version: string): Promise<ApiSurface | null> {
+    const own = await this.#surfaceFromTarball(packageName, version, packageName, version);
+    if (own) return own;
+
+    // A package that ships no declarations of its own is not untyped — for a
+    // large share of npm (react, express, lodash) the types live in a separate
+    // DefinitelyTyped package, and treating that as "untyped" makes us blind
+    // to exactly the packages most likely to be depended on. Verified against
+    // the live registry: react ships none, and without this the surface
+    // corroboration is unavailable for it and every package like it.
+    const typesName = definitelyTypedName(packageName);
+    const typesVersion = await this.#matchingTypesVersion(typesName, version);
+    if (!typesVersion) return null;
+
+    this.#log("surface.using_definitely_typed", {
+      packageName,
+      version,
+      typesPackage: typesName,
+      typesVersion,
+    });
+    // Reported under the original package's name and version: the surface
+    // describes that package, and a diff between two surfaces labelled
+    // `@types/react` would compare the wrong pair of things downstream.
+    return this.#surfaceFromTarball(typesName, typesVersion, packageName, version);
+  }
+
+  /**
+   * The highest published `@types` version whose major matches the runtime
+   * package's.
+   *
+   * DefinitelyTyped tracks the major of what it describes (react 19.x is
+   * described by @types/react 19.x), so the major is the join. Anything looser
+   * would diff a surface against declarations for a different major, which
+   * produces confident and entirely wrong impacted symbols.
+   */
+  async #matchingTypesVersion(typesName: string, version: string): Promise<string | null> {
+    const target = tryParseVersion(version);
+    if (!target) return null;
+
+    let packument;
+    try {
+      packument = await this.#collector.fetchPackument(typesName);
+    } catch {
+      // No @types package. Common and expected — most packages ship their own.
+      return null;
+    }
+
+    let best: Version | null = null;
+    for (const raw of Object.keys(packument.versions ?? {})) {
+      const candidate = tryParseVersion(raw);
+      if (!candidate) continue;
+      // Prereleases are excluded: a surface taken from @types/react@19.0.0-rc
+      // describes declarations nobody's consumers have installed.
+      if (candidate.prerelease.length > 0) continue;
+      if (candidate.major !== target.major) continue;
+      if (!best || compareVersions(candidate, best) > 0) best = candidate;
+    }
+    return best?.raw ?? null;
+  }
+
+  /** Fetches one package's tarball and extracts a surface, labelled as `asName@asVersion`. */
+  async #surfaceFromTarball(
+    fetchName: string,
+    fetchVersion: string,
+    asName: string,
+    asVersion: string,
+  ): Promise<ApiSurface | null> {
+    const packageName = fetchName;
+    const version = fetchVersion;
     try {
       const packument = await this.#collector.fetchPackument(packageName);
       const tarballUrl = packument.versions?.[version]?.dist?.tarball;
@@ -117,7 +201,12 @@ export class NpmSurfaceSource {
         }
       }
 
-      return extractApiSurface({ packageName, version, entry: `/${entry}`, files: virtual });
+      return extractApiSurface({
+        packageName: asName,
+        version: asVersion,
+        entry: `/${entry}`,
+        files: virtual,
+      });
     } catch (error) {
       this.#log("surface.extraction_failed", {
         packageName,
