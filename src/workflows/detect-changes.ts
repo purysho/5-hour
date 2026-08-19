@@ -182,6 +182,16 @@ export function detectChangesWorkflow(deps: DetectDeps) {
       // Recorded even when ineligible. A change we examined and declined is
       // worth keeping: it stops us re-examining it every sweep, and it is the
       // evidence trail if someone later asks why we did nothing.
+      //
+      // The summary leads with what changed and appends why it was declined,
+      // rather than replacing one with the other. `summary` is the only prose
+      // description this system keeps of an upstream change, and it is handed
+      // to the migration agent verbatim as `changeSummary` — a row summarised
+      // as "not eligible: capability-requires-approval" describes a gate, not
+      // a change, and an agent prompted with it is told nothing about React 19
+      // while being asked to migrate off it. `capability-requires-approval` is
+      // in particular a decline a human is expected to overturn with
+      // `db:approve`, so the description has to survive the decline intact.
       await ctx.step("record-ineligible", async () =>
         deps.recorder.record({
           providerId: ctx.providerId,
@@ -190,7 +200,9 @@ export function detectChangesWorkflow(deps: DetectDeps) {
           packageName: input.packageName,
           fromVersion: input.currentVersion,
           toVersion: toVersion.raw,
-          summary: `not eligible: ${eligibility.reason}`,
+          summary:
+            `${summarise(input.packageName, input.currentVersion, toVersion.raw, surface)}` +
+            ` — not eligible: ${eligibility.reason}`,
           corroborations,
           impactedSymbols: surface.impactedSymbols,
           approvedAt: null,

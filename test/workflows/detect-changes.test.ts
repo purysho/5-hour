@@ -250,6 +250,31 @@ describe("changes that must not proceed", () => {
     expect(recorded[0]?.summary).toContain("not eligible");
     expect(recorded[0]?.approvedAt).toBeNull();
   });
+
+  it("keeps describing the change in the summary of one it declined", async () => {
+    // `summary` is the only prose description of an upstream change this
+    // system keeps, and `migrate-repository` hands it to the agent verbatim as
+    // `changeSummary`. A decline that overwrote it left the agent prompted
+    // with a gate label instead of a change — and `capability-requires-approval`
+    // is exactly the decline a human overturns with `db:approve`, so the
+    // description has to still be there when the rollout finally runs.
+    const recorded: RecordedChange[] = [];
+    await run(
+      deps(
+        {
+          surfaces: surfaceSource({
+            "2.9.1": [symbol("createClient"), symbol("close")],
+            "3.0.0": [symbol("close")],
+          }),
+        },
+        recorded,
+      ),
+    );
+    const summary = recorded[0]?.summary ?? "";
+    expect(summary).toContain("acme-sdk 2.9.1 → 3.0.0");
+    expect(summary).toContain("createClient");
+    expect(summary).toContain("not eligible: capability-requires-approval");
+  });
 });
 
 describe("missing evidence", () => {
