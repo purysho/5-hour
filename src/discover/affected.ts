@@ -219,7 +219,14 @@ export function decideTarget(
     return skip("repository is a fork");
   }
   if (!impacts.includes(assessment.impact)) {
-    return skip(`impact "${assessment.impact}" is not targeted`);
+    // The detail travels with the verdict. "unrelated" is reached two ways —
+    // the repository does not declare the package at all, or it declares a
+    // range admitting neither version — and they are not the same problem:
+    // the first means this repository was never a consumer, the second means
+    // it is pinned somewhere the change cannot reach it. Reporting only the
+    // impact makes a rollout that skipped everything unattributable, which is
+    // how a stale manifest and a correct skip come to look identical.
+    return skip(`impact "${assessment.impact}" is not targeted: ${assessment.detail}`);
   }
   if (assessment.kind !== null && !kinds.includes(assessment.kind)) {
     return skip(`dependency kind "${assessment.kind}" is not targeted`);

@@ -150,6 +150,24 @@ describe("targeting policy", () => {
     );
   });
 
+  it("says which kind of untargeted impact, not just that it was one", () => {
+    // "unrelated" is reached two ways and they are different problems: a
+    // repository that never declared the package was never a consumer, while
+    // one declaring a range admitting neither version is pinned out of reach.
+    // A rollout that skipped everything is unattributable without this, and a
+    // stale manifest reads exactly like a correct skip.
+    const undeclared = decideTarget({ ...repo("^2.0.0"), dependencies: [] }, CHANGE);
+    expect(undeclared.skipReason).toContain("does not declare this package");
+
+    const outOfRange = decideTarget(repo("^1.0.0"), CHANGE);
+    expect(outOfRange.skipReason).toContain("admits neither");
+
+    // The policy verdict survives alongside the fact that produced it.
+    for (const decision of [undeclared, outOfRange]) {
+      expect(decision.skipReason).toContain('impact "unrelated" is not targeted');
+    }
+  });
+
   it("skips archived repositories", () => {
     // A pull request there reaches nobody.
     const decision = decideTarget(repo("^2.0.0", { archived: true }), CHANGE);
