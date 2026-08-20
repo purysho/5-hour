@@ -52,7 +52,13 @@ import {
   ClaudeMigrationAgent,
 } from "../agent/claude-migration-agent.ts";
 import { GVisorVerifier } from "../sandbox/gvisor-verifier.ts";
-import { auditFor, createMigrationDeps, createRolloutDeps, installedRepositoryCount } from "./wiring.ts";
+import {
+  auditFor,
+  createChangeRecorder,
+  createMigrationDeps,
+  createRolloutDeps,
+  installedRepositoryCount,
+} from "./wiring.ts";
 
 const config = loadConfig();
 
@@ -118,44 +124,7 @@ queue.register({
       },
       { log },
     ),
-    recorder: {
-      // `impacted_symbols` is not optional detail. The migration blast radius
-      // is derived from it before any inference runs (ADR-0013), so dropping
-      // it here would make every downstream migration refuse itself for a
-      // reason that reads like "nothing references this package".
-      //
-      // `approved_at` is preserved on conflict rather than overwritten: a
-      // re-sweep must not silently revoke a human's approval, and must not
-      // grant one either.
-      record: async (input) =>
-        db.withTenant(input.providerId, async (client) => {
-          const { rows } = await client.query<{ id: string }>(
-            `INSERT INTO upstream_change
-               (provider_id, change_key, ecosystem, package_name,
-                from_version, to_version, summary, corroborations,
-                impacted_symbols, approved_at)
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
-             ON CONFLICT (provider_id, change_key) DO UPDATE
-               SET corroborations = EXCLUDED.corroborations,
-                   summary = EXCLUDED.summary,
-                   impacted_symbols = EXCLUDED.impacted_symbols
-             RETURNING id`,
-            [
-              input.providerId,
-              input.changeKey,
-              input.ecosystem,
-              input.packageName,
-              input.fromVersion,
-              input.toVersion,
-              input.summary,
-              JSON.stringify(input.corroborations),
-              input.impactedSymbols,
-              input.approvedAt,
-            ],
-          );
-          return rows[0]!.id;
-        }),
-    },
+    recorder: { record: createChangeRecorder(db) },
     // Was a hardcoded 0, which made the reported canary size fiction. It is
     // now the tenant's live repository count — an upper bound on how many
     // repositories a change could reach, and used only where an upper bound is

@@ -1,6 +1,7 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { appDatabase, prepareDatabase, seedProvider, adminClient, type Fixture } from "../db/setup.ts";
 import {
+  createChangeRecorder,
   createMigrationDeps,
   createRolloutDeps,
   installedRepositoryCount,
@@ -534,5 +535,93 @@ describe("counting downstream repositories", () => {
     const isolated = await seedProvider(`wiring-count-${Date.now()}`);
     const count = await installedRepositoryCount(db)("acme-sdk", isolated.providerId);
     expect(count).toBe(1);
+  });
+});
+
+describe("recording a detected change", () => {
+  /**
+   * A re-sweep refreshes analysis and preserves the approval. The column that
+   * broke this was `from_version`: a change is keyed on the version moved
+   * *to*, so moving a watched package's baseline re-detects into the same row,
+   * and leaving the old baseline there made the row disagree with itself
+   * invisibly — `db:status` prints the summary, which was correct, while every
+   * downstream assessment read a stale column.
+   */
+  function change(overrides: Record<string, unknown> = {}) {
+    return {
+      providerId: tenant.providerId,
+      changeKey: "wiring-react@19.2.8",
+      ecosystem: "npm",
+      packageName: "react",
+      fromVersion: "18.2.0",
+      toVersion: "19.2.8",
+      summary: "react 18.2.0 → 19.2.8",
+      corroborations: [{ source: "registry" }],
+      impactedSymbols: ["useRef"],
+      approvedAt: null,
+      ...overrides,
+    } as Parameters<ReturnType<typeof createChangeRecorder>>[0];
+  }
+
+  async function storedRow(changeKey: string) {
+    return db.withTenant(tenant.providerId, async (client) => {
+      const { rows } = await client.query<{
+        from_version: string;
+        summary: string;
+        impacted_symbols: string[];
+        approved_at: Date | null;
+        approved_by: string | null;
+      }>(
+        `SELECT from_version, summary, impacted_symbols, approved_at, approved_by
+           FROM upstream_change WHERE change_key = $1 AND provider_id = $2`,
+        [changeKey, tenant.providerId],
+      );
+      return rows[0];
+    });
+  }
+
+  it("refreshes the baseline a re-sweep compared against", async () => {
+    const record = createChangeRecorder(db);
+    const first = await record(change());
+    const second = await record(
+      change({ fromVersion: "18.3.1", summary: "react 18.3.1 → 19.2.8" }),
+    );
+
+    // Same row — the baseline is not part of the change's identity.
+    expect(second).toBe(first);
+
+    const row = await storedRow("wiring-react@19.2.8");
+    expect(row?.from_version).toBe("18.3.1");
+    // The summary was always right; the column was the half that lagged.
+    expect(row?.summary).toContain("18.3.1");
+  });
+
+  it("refreshes impacted symbols, which the blast radius is derived from", async () => {
+    const record = createChangeRecorder(db);
+    await record(change({ changeKey: "wiring-vue@4.0.0", impactedSymbols: [] }));
+    await record(change({ changeKey: "wiring-vue@4.0.0", impactedSymbols: ["createApp", "ref"] }));
+
+    const row = await storedRow("wiring-vue@4.0.0");
+    expect(row?.impacted_symbols).toEqual(["createApp", "ref"]);
+  });
+
+  it("never revokes or grants an approval on re-sweep", async () => {
+    const record = createChangeRecorder(db);
+    await record(change({ changeKey: "wiring-svelte@6.0.0" }));
+
+    await db.withTenant(tenant.providerId, (client) =>
+      client.query(
+        `UPDATE upstream_change SET approved_at = now(), approved_by = 'oliver'
+          WHERE change_key = $1 AND provider_id = $2`,
+        ["wiring-svelte@6.0.0", tenant.providerId],
+      ),
+    );
+
+    await record(change({ changeKey: "wiring-svelte@6.0.0", fromVersion: "5.9.0" }));
+
+    const row = await storedRow("wiring-svelte@6.0.0");
+    expect(row?.approved_at).not.toBeNull();
+    expect(row?.approved_by).toBe("oliver");
+    expect(row?.from_version).toBe("5.9.0");
   });
 });

@@ -594,3 +594,77 @@ export function installedRepositoryCount(db: Database) {
     });
   };
 }
+
+/**
+ * Records a detected change, or refreshes one already recorded.
+ *
+ * Lives here rather than inline in `run-worker.ts` so it can be tested. It was
+ * inline, and the module it was in calls `loadConfig()` at import time, so no
+ * test could reach it — which is how the conflict clause below came to be
+ * wrong in a way nothing noticed.
+ *
+ * ── What the conflict clause must and must not carry over ───────────────────
+ *
+ * `change_key` is `<package>@<to-version>`, so a change's identity is the
+ * version being moved *to*. Everything else on the row is analysis, and a
+ * re-sweep re-derives all of it: corroborations, the summary, the impacted
+ * symbols, and the baseline it was compared against.
+ *
+ * `from_version` was the one piece of that analysis left behind. Moving a
+ * watched package's baseline re-detects into this same row, so the summary
+ * would update to "18.3.1 → 19.2.8" while the column every downstream
+ * assessment reads stayed at 18.2.0 — a row disagreeing with itself, and a
+ * disagreement visible nowhere: `db:status` prints the summary. Downstream, a
+ * repository declaring ^18.3.1 was assessed against 18.2.0, found to admit
+ * neither that nor the new version, and skipped as "unrelated".
+ *
+ * `impacted_symbols` is refreshed for a related reason: the migration blast
+ * radius is derived from it before any inference runs (ADR-0013), so a stale
+ * or empty value makes every downstream migration refuse itself for a reason
+ * that reads like "nothing references this package".
+ *
+ * `approved_at` is the one column deliberately preserved. A re-sweep must not
+ * silently revoke a human's approval, and must not grant one either.
+ */
+export function createChangeRecorder(db: Database) {
+  return async (input: {
+    providerId: string;
+    changeKey: string;
+    ecosystem: string;
+    packageName: string;
+    fromVersion: string;
+    toVersion: string;
+    summary: string;
+    corroborations: readonly unknown[];
+    impactedSymbols: readonly string[];
+    approvedAt: string | null;
+  }): Promise<string> =>
+    db.withTenant(input.providerId, async (client) => {
+      const { rows } = await client.query<{ id: string }>(
+        `INSERT INTO upstream_change
+           (provider_id, change_key, ecosystem, package_name,
+            from_version, to_version, summary, corroborations,
+            impacted_symbols, approved_at)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+         ON CONFLICT (provider_id, change_key) DO UPDATE
+           SET corroborations   = EXCLUDED.corroborations,
+               summary          = EXCLUDED.summary,
+               impacted_symbols = EXCLUDED.impacted_symbols,
+               from_version     = EXCLUDED.from_version
+         RETURNING id`,
+        [
+          input.providerId,
+          input.changeKey,
+          input.ecosystem,
+          input.packageName,
+          input.fromVersion,
+          input.toVersion,
+          input.summary,
+          JSON.stringify(input.corroborations),
+          input.impactedSymbols,
+          input.approvedAt,
+        ],
+      );
+      return rows[0]!.id;
+    });
+}
