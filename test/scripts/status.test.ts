@@ -160,6 +160,51 @@ describe("pipeline status", () => {
     expect(output).toContain("skipped acme/web: manifest could not be read");
   });
 
+  it("surfaces a dead job, not only a retrying one", async () => {
+    // 'failed' will be retried; 'dead' has exhausted its attempts and is
+    // terminal. Querying only 'failed' hid the jobs that had stopped for good
+    // and would never report themselves again.
+    const providerId = await seed("status-dead-job");
+    const client = await adminClient();
+    try {
+      await client.query(
+        `INSERT INTO job (provider_id, workflow, status, attempts, last_error, finished_at)
+              VALUES ($1, 'migrate-repository', 'dead', 3, 'agent refused: no usable source files', now())`,
+        [providerId],
+      );
+    } finally {
+      await client.end();
+    }
+
+    const status = await readStatus(ADMIN_URL);
+    expect(status.failures.some((f) => f.status === "dead")).toBe(true);
+
+    const output = render(status);
+    expect(output).toContain("agent refused: no usable source files");
+    expect(output).toContain("DEAD, no further attempts");
+  });
+
+  it("says when a rollout enqueued nothing because it was already queued", async () => {
+    // "targeted 4, enqueued 0" reads as a rollout that did nothing. It is a
+    // re-plan finding every migration already present on its dedupe key, which
+    // is ADR-0004 working rather than failing.
+    const providerId = await seed("status-dupe-rollout");
+    const client = await adminClient();
+    try {
+      await client.query(
+        `INSERT INTO job (provider_id, workflow, status, result, finished_at)
+              VALUES ($1, 'plan-rollout', 'succeeded',
+                      '{"kind":"planned","targeted":4,"enqueued":0,"duplicates":4,"skipped":[]}'::jsonb,
+                      now())`,
+        [providerId],
+      );
+    } finally {
+      await client.end();
+    }
+
+    expect(render(await readStatus(ADMIN_URL))).toContain("4 already queued");
+  });
+
   it("prints why a failed job failed, not just that it did", async () => {
     // A failed job is neither pending nor running, so it is invisible in a
     // status count; 'failed 1' tells nobody what to do next.

@@ -59,6 +59,7 @@ export interface RolloutResult {
   readonly kind: string;
   readonly targeted: number | null;
   readonly enqueued: number | null;
+  readonly duplicates: number | null;
   readonly skipped: readonly { owner: string; name: string; reason: string }[];
 }
 
@@ -70,6 +71,7 @@ export interface JobCount {
 
 export interface JobFailure {
   readonly workflow: string;
+  readonly status: string;
   readonly attempts: number;
   readonly lastError: string | null;
   readonly finishedAt: Date | null;
@@ -149,11 +151,16 @@ export async function readStatus(connectionString: string): Promise<PipelineStat
         LIMIT 3`,
     );
 
+    // 'dead' as well as 'failed', and 'dead' first. They are different facts:
+    // 'failed' will be retried, 'dead' has exhausted its attempts and is
+    // terminal (migration 004). Querying only 'failed' hid exactly the jobs
+    // that had stopped for good and would never report themselves again — the
+    // ones worth waking someone for.
     const failures = await client.query(
-      `SELECT workflow, attempts, last_error, finished_at
+      `SELECT workflow, status::text AS status, attempts, last_error, finished_at
          FROM job
-        WHERE status = 'failed'
-        ORDER BY finished_at DESC NULLS LAST
+        WHERE status IN ('dead', 'failed')
+        ORDER BY (status = 'dead') DESC, finished_at DESC NULLS LAST
         LIMIT 10`,
     );
 
@@ -194,10 +201,12 @@ export async function readStatus(connectionString: string): Promise<PipelineStat
         kind: typeof r.result?.kind === "string" ? r.result.kind : "unknown",
         targeted: typeof r.result?.targeted === "number" ? r.result.targeted : null,
         enqueued: typeof r.result?.enqueued === "number" ? r.result.enqueued : null,
+        duplicates: typeof r.result?.duplicates === "number" ? r.result.duplicates : null,
         skipped: Array.isArray(r.result?.skipped) ? r.result.skipped : [],
       })),
       failures: failures.rows.map((r) => ({
         workflow: r.workflow,
+        status: r.status,
         attempts: r.attempts,
         lastError: r.last_error,
         finishedAt: r.finished_at,
@@ -281,10 +290,15 @@ export function render(status: PipelineStatus): string {
   if (status.rollouts.length > 0) {
     out.push("", "Rollouts");
     for (const r of status.rollouts) {
+      // Duplicates are shown because their absence misleads: a re-planned
+      // rollout finds every migration already queued and reports "enqueued 0",
+      // which reads as having done nothing rather than as ADR-0004's dedupe
+      // working.
+      const dupes = r.duplicates ? `, ${r.duplicates} already queued` : "";
       const counts =
         r.targeted === null
           ? ""
-          : `  targeted ${r.targeted}, enqueued ${r.enqueued ?? 0}`;
+          : `  targeted ${r.targeted}, enqueued ${r.enqueued ?? 0}${dupes}`;
       out.push(`  ${r.kind}${counts}  (${ago(r.finishedAt)})`);
       if (r.kind === "planned" && r.targeted === 0 && r.skipped.length === 0) {
         // Distinguishes "no repositories at all" from "repositories, all
@@ -301,9 +315,12 @@ export function render(status: PipelineStatus): string {
   }
 
   if (status.failures.length > 0) {
-    out.push("", "Recent failures");
+    out.push("", "Failures");
     for (const f of status.failures) {
-      out.push(`  ${f.workflow} (attempt ${f.attempts}, ${ago(f.finishedAt)})`);
+      const terminal = f.status === "dead" ? "DEAD, no further attempts" : "will retry";
+      out.push(
+        `  ${f.workflow} [${terminal}] (attempt ${f.attempts}, ${ago(f.finishedAt)})`,
+      );
       out.push(`    ${f.lastError ?? "no error recorded"}`);
     }
   }
