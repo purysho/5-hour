@@ -26,6 +26,7 @@
 import pg from "pg";
 import { loadConfig, Secret, ConfigError, type Config } from "../src/config.ts";
 import { createAppJwt, FileSigner, KmsSigner, type Signer } from "../src/github/signer.ts";
+import { AwsKmsClient } from "../src/github/kms-signer.ts";
 import { FORBIDDEN_PERMISSIONS, REQUIRED_PERMISSIONS } from "../src/github/token.ts";
 
 type Level = "pass" | "warn" | "fail";
@@ -63,14 +64,18 @@ let signer: Signer | null = null;
 if (config) {
   try {
     if (config.github.signing.kind === "kms") {
-      // Constructed without a client: reaching KMS needs credentials this
-      // script deliberately does not assume it has. What is being checked is
-      // that a key id is configured at all.
-      signer = new KmsSigner(
-        { sign: async () => { throw new Error("KMS client not configured in preflight"); } },
-        config.github.signing.keyId,
-      );
-      record("warn", "signing key", `KMS ${config.github.signing.keyId} — not exercised here`);
+      // A real client. This was a stub that threw, on the reasoning that
+      // preflight should not assume it has AWS credentials — but preflight is
+      // run on the host that is about to serve traffic, where those
+      // credentials exist by definition, and the stub made every check below
+      // it silently skip.
+      //
+      // That is how a KMS key whose material GitHub had never issued reached
+      // production: preflight reported five checks, none failing, and never
+      // once asked GitHub whether the key worked. A signature costs a
+      // fraction of a cent and is the only thing that answers the question.
+      signer = new KmsSigner(new AwsKmsClient(), config.github.signing.keyId);
+      record("pass", "signing key", `KMS ${config.github.signing.keyId} — exercised below`);
     } else {
       signer = new FileSigner(config.github.signing.path);
       record(
@@ -101,7 +106,7 @@ interface AppResponse {
 
 let app: AppResponse | null = null;
 
-if (config && signer && config.github.signing.kind === "file") {
+if (config && signer) {
   try {
     const jwt = await createAppJwt(signer, config.github.appId);
     const response = await fetch("https://api.github.com/app", {
@@ -138,7 +143,19 @@ if (config && signer && config.github.signing.kind === "file") {
       }
     }
   } catch (error) {
-    record("warn", "app identity", `could not reach GitHub: ${(error as Error).message}`);
+    // Signing and reaching GitHub fail differently and deserve different
+    // verdicts. A key that cannot produce a signature is a broken deployment;
+    // a network that cannot be reached from here is a limitation of where
+    // preflight is being run.
+    const message = (error as Error).message;
+    const signingFailed = /KMS|sign|key/i.test(message);
+    record(
+      signingFailed ? "fail" : "warn",
+      "app identity",
+      signingFailed
+        ? `could not sign an App JWT: ${message}`
+        : `could not reach GitHub: ${message}`,
+    );
   }
 }
 
@@ -148,7 +165,19 @@ if (config && signer && config.github.signing.kind === "file") {
 // on a web page — no diff, no review, ten seconds — and `administration` or
 // `workflows` would end the guarantee that human review cannot be bypassed.
 
-if (app?.permissions) {
+if (!app?.permissions) {
+  // The check this script exists for, and it was reachable only when the App
+  // identity had been established — so when identity could not be established
+  // it recorded nothing at all, and `preflight` exited 0 having verified the
+  // one thing it is named for exactly not at all. A check that silently does
+  // not run is worse than one that is absent: absence is visible.
+  record(
+    "fail",
+    "permissions: required",
+    "not checked — the App's permission manifest could not be read. " +
+      "Every check above that needed an App JWT will say why.",
+  );
+} else {
   const granted = app.permissions;
 
   const missing = Object.entries(REQUIRED_PERMISSIONS).filter(
@@ -204,7 +233,7 @@ if (app?.events) {
 
 // ── 5. Installations ────────────────────────────────────────────────────────
 
-if (config && signer && config.github.signing.kind === "file" && app) {
+if (config && signer && app) {
   try {
     const jwt = await createAppJwt(signer, config.github.appId);
     const response = await fetch("https://api.github.com/app/installations?per_page=100", {

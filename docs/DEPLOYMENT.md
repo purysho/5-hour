@@ -75,6 +75,46 @@ to `preDeployCommand`: the migrations create roles and RLS policies, and a schem
 change that runs automatically on every push is one nobody reviewed. Add it there
 yourself if you would rather trade that review for the convenience.
 
+### The two login roles
+
+`pnpm db:migrate` creates `driftless_app` and `driftless_admin` — both
+`NOLOGIN NOBYPASSRLS`, holding every grant the application needs. It does not
+create the roles you actually connect as, because those need passwords and a
+password does not belong in a migration file.
+
+Skipping this step does not fail anything. It leaves you connecting as
+`postgres`, and a superuser bypasses row-level security even with
+`FORCE ROW LEVEL SECURITY` set — so every isolation guarantee in ADR-0005
+becomes decorative while the system behaves exactly as it would if they held.
+With one tenant that costs nothing. The first customer added is when it starts
+mattering, and nothing about that moment announces itself.
+
+Run once, as a superuser, after `db:migrate`:
+
+```sql
+-- `\password` prompts, rather than putting the secret in shell history,
+-- `ps` output, or the server log that logs every statement.
+CREATE ROLE driftless_app_login LOGIN
+  NOSUPERUSER NOBYPASSRLS NOCREATEDB NOCREATEROLE;
+GRANT driftless_app TO driftless_app_login;
+\password driftless_app_login
+
+CREATE ROLE driftless_worker_login LOGIN
+  NOSUPERUSER NOBYPASSRLS NOCREATEDB NOCREATEROLE;
+GRANT driftless_admin TO driftless_worker_login;
+\password driftless_worker_login
+```
+
+Then point the two connection strings at them — `DATABASE_URL` at
+`driftless_app_login`, `PLATFORM_DATABASE_URL` at `driftless_worker_login`.
+They are different roles on purpose: the app role is RLS-confined, and the
+platform role is the narrow cross-tenant one the dequeue and the two
+minimal-disclosure lookups need (ADR-0010). One login for both is acceptable
+in development and is the thing being avoided in production.
+
+`pnpm preflight` checks both, and fails rather than warns on a superuser — it
+is the one check that cannot be inferred from behaviour afterwards.
+
 ### Enrolment
 
 Installing the GitHub App is not enough to onboard anyone, and the failure is
@@ -212,7 +252,9 @@ new rollout.
 ### The whole first-run sequence
 
 ```bash
-pnpm db:migrate                          # schema, roles, RLS
+pnpm db:migrate                          # schema, group roles, RLS
+# create the two login roles (above), then point the URLs at them
+pnpm preflight                           # proves the App and the roles work
 pnpm db:provider acme "Acme Inc"         # the paying tenant
 # set DEFAULT_PROVIDER_SLUG=acme on both services, then install the App
 pnpm db:watch react 18.2.0               # something to detect
