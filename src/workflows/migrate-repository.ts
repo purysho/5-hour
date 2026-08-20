@@ -17,6 +17,8 @@ import { issueOptOutToken, recordOptOutToken } from "../outbound/suppression.ts"
 import type { Impact } from "../discover/affected.ts";
 import type { UntrustedContent } from "../agent/untrusted.ts";
 import type { FileChange } from "../agent/unified-diff.ts";
+import { NoEditsProposedError } from "../agent/edit-plan.ts";
+import { MigrationGenerationError } from "../agent/claude-migration-agent.ts";
 
 /**
  * The migration workflow — the pipeline every other component exists to serve.
@@ -257,19 +259,46 @@ export function migrateRepositoryWorkflow(deps: MigrationDeps) {
     // agent sees them only through wrapped data channels; the step returns
     // the diff, which is Driftless-derived output rather than raw repository
     // content.
-    const generated = await ctx.step("generate-migration", async () => {
-      const sources = await deps.loadSources(input, loaded.repository);
-      return deps.agent.generate({
-        repository: loaded.repository,
-        sources,
-        changeSummary: loaded.changeSummary,
-        // From our own change record, not from the agent. The blast radius the
-        // policy engine enforces below is derived from these, so letting the
-        // agent supply them would let a generated migration choose the bound
-        // it is then judged against.
-        impactedSymbols: loaded.change.impactedSymbols,
+    let generated;
+    try {
+      generated = await ctx.step("generate-migration", async () => {
+        const sources = await deps.loadSources(input, loaded.repository);
+        return deps.agent.generate({
+          repository: loaded.repository,
+          sources,
+          changeSummary: loaded.changeSummary,
+          // From our own change record, not from the agent. The blast radius the
+          // policy engine enforces below is derived from these, so letting the
+          // agent supply them would let a generated migration choose the bound
+          // it is then judged against.
+          impactedSymbols: loaded.change.impactedSymbols,
+        });
       });
-    });
+    } catch (error) {
+      // A repository the change does not actually break. The blast radius
+      // selects files that *mention* an impacted symbol, which is lexical;
+      // whether the mention needs changing is semantic, and answered here. A
+      // codebase already written against the new version matches on names and
+      // needs nothing done to it.
+      //
+      // That is a skip, not a failure. It was neither: the error retried to
+      // the attempt ceiling and died, spending a paid model call on each
+      // attempt to be told the same thing.
+      if (error instanceof NoEditsProposedError) {
+        ctx.log("migration.no_changes_needed", {
+          repository: `${loaded.repository.forgeOwner}/${loaded.repository.forgeName}`,
+        });
+        return { status: "skipped", reason: "no changes needed" };
+      }
+      // Every other generation failure is terminal for the same reason a
+      // rejected diff is: the inputs are fixed, so the next attempt asks an
+      // identical question. Retrying spent five more model calls per
+      // repository and reached the same answer.
+      if (error instanceof MigrationGenerationError) {
+        throw new PermanentFailure(error.message);
+      }
+      throw error;
+    }
 
     // ── 4. Policy ───────────────────────────────────────────────────────────
     // Deterministic, no inference. Runs on every diff regardless of how

@@ -21,6 +21,8 @@ import {
   type MigrationDeps,
   type MigrationOutcome,
 } from "../../src/workflows/migrate-repository.ts";
+import { NoEditsProposedError } from "../../src/agent/edit-plan.ts";
+import { MigrationGenerationError } from "../../src/agent/claude-migration-agent.ts";
 import { generateKeyPairSync } from "node:crypto";
 
 /**
@@ -495,6 +497,59 @@ describe("the kill switch stops the pipeline", () => {
         await reset.end();
       }
     }
+  });
+});
+
+describe("a repository the change does not break", () => {
+  it("skips it rather than failing, and asks the model once", async () => {
+    // The blast radius selects files that *mention* an impacted symbol, which
+    // is lexical; whether the mention needs changing is semantic and answered
+    // by the model. A codebase already written against the new version matches
+    // on names and needs nothing done to it.
+    //
+    // That was a failure which retried to the attempt ceiling and died,
+    // spending a paid model call on every attempt to be told the same thing.
+    const tenant = await seedProvider("wf-no-changes");
+
+    let calls = 0;
+    const deps = buildDeps({
+      agent: {
+        generate: async () => {
+          calls += 1;
+          throw new NoEditsProposedError("Model proposed no edits");
+        },
+      } as never,
+    });
+
+    const { outcome } = await runWorkflow(tenant, deps);
+
+    expect(outcome).toMatchObject({ status: "skipped", reason: "no changes needed" });
+    expect(calls).toBe(1);
+  });
+
+  it("does not retry a generation failure that will fail identically", async () => {
+    // The same reasoning the policy rejection already used: the inputs are
+    // fixed, so the next attempt asks an identical question. Asserted through
+    // the queue rather than on the thrown type, because the property that
+    // matters is the job going terminal on its first attempt — a retryable
+    // failure would land on 'failed' and be tried twice more, at the cost of
+    // a model call each.
+    const tenant = await seedProvider("wf-generation-terminal");
+
+    let calls = 0;
+    const deps = buildDeps({
+      agent: {
+        generate: async () => {
+          calls += 1;
+          throw new MigrationGenerationError("No usable source files were supplied");
+        },
+      } as never,
+    });
+
+    const { status } = await runWorkflow(tenant, deps);
+
+    expect(status).toBe("dead");
+    expect(calls).toBe(1);
   });
 });
 

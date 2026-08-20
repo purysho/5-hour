@@ -62,7 +62,30 @@ export interface EditPlan {
 }
 
 export class EditPlanError extends Error {
-  override readonly name = "EditPlanError";
+  // `string`, not a literal: a subclass has to be able to name itself, and a
+  // literal type here makes every subclass a type error.
+  override readonly name: string = "EditPlanError";
+}
+
+/**
+ * The model looked and concluded nothing needs changing.
+ *
+ * Distinct from every other `EditPlanError` because it is not a rejection.
+ * The others describe output we could not use — not an object, no `edits`
+ * array, a path outside the blast radius. This one describes output we
+ * understood perfectly: a repository the change does not actually break.
+ *
+ * That happens legitimately and often. The blast radius selects files that
+ * *mention* an impacted symbol, which is a lexical test; whether the mention
+ * needs changing is a semantic one the model answers afterwards. A codebase
+ * already written against the new version matches on symbol names and needs
+ * no edits at all.
+ *
+ * Kept a subclass so existing handling still catches it, and separated so the
+ * one caller that should not treat it as a failure can say so.
+ */
+export class NoEditsProposedError extends EditPlanError {
+  override readonly name = "NoEditsProposedError";
 }
 
 /** Refuses a plan larger than any real migration, before doing any work. */
@@ -91,7 +114,7 @@ export function parseEditPlan(raw: unknown): EditPlan {
     throw new EditPlanError("Model output has no `edits` array");
   }
   if (rawEdits.length === 0) {
-    throw new EditPlanError("Model proposed no edits");
+    throw new NoEditsProposedError("Model proposed no edits");
   }
   if (rawEdits.length > MAX_EDITS) {
     throw new EditPlanError(

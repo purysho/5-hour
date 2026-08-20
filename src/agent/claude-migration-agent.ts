@@ -45,6 +45,7 @@ import {
   parseEditPlan,
   EDIT_PLAN_SCHEMA,
   EditPlanError,
+  NoEditsProposedError,
   type SourceContent,
 } from "./edit-plan.ts";
 import {
@@ -226,6 +227,10 @@ export class ClaudeMigrationAgent implements MigrationAgent {
     try {
       plan = parseEditPlan(raw);
     } catch (error) {
+      // Passed through with its identity intact. "No edits" is a conclusion
+      // about the repository, not a fault in the output, and the caller
+      // distinguishes them — see NoEditsProposedError.
+      if (error instanceof NoEditsProposedError) throw error;
       if (error instanceof EditPlanError) {
         throw new MigrationGenerationError(`Model proposal rejected: ${error.message}`);
       }
