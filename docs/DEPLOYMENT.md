@@ -244,6 +244,23 @@ It removes that one change's rollout job and leaves `approved_at` and
 it, and rewriting that to make a rollout run again falsifies the record anyone
 will actually ask for. There is no bulk form, deliberately.
 
+That re-plans the rollout but not its migrations. Those are deduplicated on
+`migrate:<change>:<repository>:<sha>`, and a job holds that key in every status
+including the terminal ones — so a repository whose migration died is never
+attempted again at that commit, and the next rollout counts it as a duplicate
+rather than retrying it.
+
+```bash
+pnpm db:replan react@19.2.8 --retry-migrations
+```
+
+clears the dead and cancelled ones for that change. It is off by default
+because a rollout re-planned after a *reporting* fix should reach the same
+repositories and skip the same ones; clearing migrations is right only when
+what was fixed is the thing that failed them. Pending and running jobs are
+never touched — they are live work — and neither are succeeded ones, which
+already opened a pull request that re-running would duplicate.
+
 Note that the change key is `<package>@<to-version>` — the baseline is not part
 of it. Re-running `pnpm db:watch` with a different baseline therefore updates
 the existing change rather than creating a second one, and does not produce a

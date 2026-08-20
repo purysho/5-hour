@@ -49,6 +49,53 @@ async function seedApproved(
   }
 }
 
+async function seedMigration(
+  providerId: string,
+  changeId: string,
+  repo: string,
+  status: string,
+): Promise<void> {
+  const client = await adminClient();
+  try {
+    // Matching the table's own CHECKs rather than approximating them:
+    // job_terminal_finished wants finished_at on succeeded/dead/cancelled, and
+    // job_lease_coherent wants a lease on running.
+    const terminal = ["dead", "succeeded", "cancelled"].includes(status);
+    const running = status === "running";
+    await client.query(
+      `INSERT INTO job
+         (provider_id, workflow, status, dedupe_key, finished_at,
+          leased_by, lease_expires_at)
+       VALUES ($1, 'migrate-repository', $2::job_status, $3, $4, $5, $6)`,
+      [
+        providerId,
+        status,
+        `migrate:${changeId}:${repo}:abc123`,
+        terminal ? new Date() : null,
+        running ? "worker-test" : null,
+        running ? new Date(Date.now() + 60_000) : null,
+      ],
+    );
+  } finally {
+    await client.end();
+  }
+}
+
+async function migrationStatuses(changeId: string): Promise<string[]> {
+  const client = await adminClient();
+  try {
+    const { rows } = await client.query<{ status: string }>(
+      `SELECT status::text AS status FROM job
+        WHERE workflow = 'migrate-repository' AND dedupe_key LIKE $1
+        ORDER BY dedupe_key`,
+      [`migrate:${changeId}:%`],
+    );
+    return rows.map((r) => r.status);
+  } finally {
+    await client.end();
+  }
+}
+
 async function rolloutJobCount(changeId: string): Promise<number> {
   const client = await adminClient();
   try {
@@ -127,6 +174,53 @@ describe("replanning a rollout", () => {
 
     await expect(replan(ADMIN_URL, "shared@9.0.0")).rejects.toThrow(/matches 2 providers/);
     expect(await rolloutJobCount(other.changeId)).toBe(1);
+  });
+
+  it("leaves terminal migrations alone unless asked", async () => {
+    // The default is a re-plan after a reporting fix, which should reach the
+    // same repositories and skip the same ones. Clearing migrations would make
+    // it re-open work that already ran.
+    const { providerId, changeId } = await seedApproved("replan-keeps-migrations", "keep@1.0.0");
+    await seedMigration(providerId, changeId, "repo-a", "dead");
+
+    await replan(ADMIN_URL, "keep@1.0.0", "replan-keeps-migrations");
+
+    expect(await migrationStatuses(changeId)).toEqual(["dead"]);
+  });
+
+  it("clears dead migrations with --retry-migrations, and only those", async () => {
+    // A job holds its dedupe key in every status, so a repository whose
+    // migration died is never attempted again at that commit — the next
+    // rollout finds the key and reports a duplicate.
+    //
+    // Pending and running are live work; deleting either strands a repository
+    // mid-flight. Succeeded already opened a pull request, and re-running
+    // would open a second one.
+    const { providerId, changeId } = await seedApproved("replan-retry", "retry@1.0.0");
+    await seedMigration(providerId, changeId, "a-dead", "dead");
+    await seedMigration(providerId, changeId, "b-succeeded", "succeeded");
+    await seedMigration(providerId, changeId, "c-pending", "pending");
+    await seedMigration(providerId, changeId, "d-running", "running");
+
+    const result = await replan(ADMIN_URL, "retry@1.0.0", "replan-retry", {
+      retryMigrations: true,
+    });
+
+    expect(result.migrationsCleared).toBe(1);
+    expect(await migrationStatuses(changeId)).toEqual(["succeeded", "pending", "running"]);
+  });
+
+  it("does not reach another change's migrations", async () => {
+    // Bounded by the dedupe key prefix, which carries the change id.
+    const mine = await seedApproved("replan-scope-mine", "mine@1.0.0");
+    const theirs = await seedApproved("replan-scope-theirs", "theirs@1.0.0");
+    await seedMigration(mine.providerId, mine.changeId, "r", "dead");
+    await seedMigration(theirs.providerId, theirs.changeId, "r", "dead");
+
+    await replan(ADMIN_URL, "mine@1.0.0", "replan-scope-mine", { retryMigrations: true });
+
+    expect(await migrationStatuses(mine.changeId)).toEqual([]);
+    expect(await migrationStatuses(theirs.changeId)).toEqual(["dead"]);
   });
 
   it("refuses a change key that does not exist", async () => {

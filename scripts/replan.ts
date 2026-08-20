@@ -12,6 +12,20 @@
  * acts, and only the second one is this script:
  *
  *   pnpm db:replan react@19.2.8
+ *   pnpm db:replan react@19.2.8 --retry-migrations
+ *
+ * A rollout's migrations are deduplicated on
+ * `migrate:<change>:<repository>:<sha>`, and a job holds that key in every
+ * status including the terminal ones. So a repository whose migration died is
+ * never attempted again at that commit, even after the thing that killed it is
+ * fixed — the next rollout finds the key and reports a duplicate.
+ *
+ * `--retry-migrations` clears the dead and cancelled ones. It is off by
+ * default because a rollout re-planned after a reporting fix should reach the
+ * same repositories and skip the same ones; clearing migrations is right only
+ * when what was fixed is the thing that failed them. Pending and running jobs
+ * are never touched — they are live work — and neither are succeeded ones,
+ * which already opened a pull request that re-running would duplicate.
  *
  * It removes the rollout job for one named change and nothing else. No bulk
  * form and no "all pending" flag, deliberately: the guard exists so that a
@@ -37,6 +51,8 @@ import { resolveChange } from "./resolve-change.ts";
 export interface ReplanResult {
   readonly changeKey: string;
   readonly removed: number;
+  /** Terminal migration jobs cleared by --retry-migrations. */
+  readonly migrationsCleared: number;
   readonly approvedBy: string | null;
 }
 
@@ -44,6 +60,7 @@ export async function replan(
   connectionString: string,
   changeKey: string,
   providerSlug?: string,
+  options: { retryMigrations?: boolean } = {},
 ): Promise<ReplanResult> {
   const client = new pg.Client({ connectionString });
   await client.connect();
@@ -69,9 +86,34 @@ export async function replan(
       [`rollout:${change.id}`],
     );
 
+    // Off by default, because a rollout re-planned after a *reporting* fix
+    // should reach the same repositories and skip the same ones. Clearing
+    // migrations makes the next rollout re-open work that already ran, which
+    // is the right move only when what was fixed is the thing that failed
+    // them.
+    //
+    // Terminal states only. A pending or running migration is live work and
+    // deleting it would strand a repository mid-flight; a succeeded one
+    // already produced its pull request, and re-running would open a second.
+    //
+    // The keys are `migrate:<change>:<repository>:<sha>`, so this is bounded
+    // to this change and cannot reach another's.
+    let migrationsCleared = 0;
+    if (options.retryMigrations) {
+      const cleared = await client.query(
+        `DELETE FROM job
+          WHERE workflow = 'migrate-repository'
+            AND status IN ('dead', 'cancelled')
+            AND dedupe_key LIKE $1`,
+        [`migrate:${change.id}:%`],
+      );
+      migrationsCleared = cleared.rowCount ?? 0;
+    }
+
     return {
       changeKey,
       removed: rowCount ?? 0,
+      migrationsCleared,
       approvedBy: change.approvedBy,
     };
   } finally {
@@ -92,6 +134,7 @@ if (isEntrypoint) {
   const connectionString = process.env["DATABASE_URL"];
   const changeKey = argv[0]?.startsWith("--") ? undefined : argv[0];
   const providerSlug = flag(argv, "provider");
+  const retryMigrations = argv.includes("--retry-migrations");
 
   if (!connectionString) {
     console.error("DATABASE_URL is required");
@@ -99,7 +142,7 @@ if (isEntrypoint) {
   }
   if (!changeKey) {
     console.error(
-      "usage: pnpm db:replan <change-key> [--provider slug]\n" +
+      "usage: pnpm db:replan <change-key> [--provider slug] [--retry-migrations]\n" +
         "Removes one approved change's rollout job so it is planned again.\n" +
         "`pnpm db:status` lists the change keys.",
     );
@@ -107,17 +150,26 @@ if (isEntrypoint) {
   }
 
   try {
-    const result = await replan(connectionString, changeKey, providerSlug);
+    const result = await replan(connectionString, changeKey, providerSlug, {
+      retryMigrations,
+    });
     if (result.removed === 0) {
       console.log(
         `${result.changeKey} has no rollout job; the approval trigger will ` +
           `enqueue one on its next tick.`,
       );
     } else {
+      const migrations =
+        result.migrationsCleared > 0
+          ? `\n${result.migrationsCleared} terminal migration job(s) cleared; ` +
+            `those repositories will be attempted again.`
+          : retryMigrations
+            ? "\nNo terminal migration jobs to clear."
+            : "";
       console.log(
         `Removed the rollout job for ${result.changeKey}.\n` +
           `Still approved by ${result.approvedBy ?? "?"} — the trigger re-plans ` +
-          `it on its next tick.`,
+          `it on its next tick.${migrations}`,
       );
     }
   } catch (error) {
