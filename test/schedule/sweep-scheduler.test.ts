@@ -97,6 +97,24 @@ describe("tick", () => {
     );
   });
 
+  it("does not suppress a sweep at the shortest interval the database allows", async () => {
+    // The default bucket was an hour, which capped every package at one sweep
+    // per hour however it was configured. A package on the minimum 60s
+    // interval was claimed every minute — `last_swept_at` moved, so it looked
+    // swept — while 59 of every 60 enqueues hit an existing key and did
+    // nothing. Defaults, deliberately: this pins the shipped behaviour, not a
+    // value a test chose.
+    const queue = recordingQueue();
+    const store = storeReturning([PACKAGE], [PACKAGE]);
+    const scheduler = new SweepScheduler({ store, queue });
+
+    await scheduler.tick(new Date("2026-08-14T10:00:00Z"));
+    const second = await scheduler.tick(new Date("2026-08-14T10:01:00Z"));
+
+    expect(second).toMatchObject({ claimed: 1, enqueued: 1, duplicate: 0 });
+    expect(queue.calls[0]?.dedupeKey).not.toBe(queue.calls[1]?.dedupeKey);
+  });
+
   it("reports a duplicate rather than counting it as work", async () => {
     // Two ticks inside one bucket. The database claim should already have
     // prevented this; the dedupe key is the second line, and the count is how

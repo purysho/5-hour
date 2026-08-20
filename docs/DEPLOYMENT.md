@@ -137,6 +137,14 @@ the change it had just found the moment it ran again.
 A new row has `last_swept_at` NULL and sorts first, so the scheduler claims it
 on its next tick rather than one interval later.
 
+`--interval` is honoured down to 60 seconds, the floor the
+`watched_package_interval_sane` constraint enforces. Note that a claimed sweep
+and an executed one are different events: `claim_due_sweeps` advances
+`last_swept_at` as it claims, so a recent `last swept` in `pnpm db:status` says
+the scheduler reached the package, not that detection ran. The `detect-changes`
+count in the Jobs section is the one that says that — if `last swept` keeps
+moving while that count does not, sweeps are being claimed and dropped.
+
 ### Approving a change
 
 Detection does not open pull requests. `plan-rollout` refuses to fan out a

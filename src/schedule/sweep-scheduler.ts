@@ -76,7 +76,29 @@ export interface TickResult {
 }
 
 const DEFAULT_BATCH_SIZE = 50;
-const DEFAULT_BUCKET_MS = 3_600_000;
+
+/**
+ * The dedupe bucket, and why it is exactly the shortest legal sweep interval.
+ *
+ * `watched_package_interval_sane` (migration 007) constrains
+ * `sweep_interval_seconds` to 60 or more, so two legitimate sweeps of the same
+ * package are never less than 60s apart — and since `floor(t / 60s)` and
+ * `floor((t + 60s) / 60s)` always differ, a 60-second bucket can never
+ * suppress one.
+ *
+ * It was an hour, which silently capped every package at one sweep per hour
+ * however it was configured. A package on the minimum 60s interval was claimed
+ * every minute — `claim_due_sweeps` advanced its clock each time, so
+ * `last_swept_at` showed a fresh sweep — while 59 of every 60 enqueues hit an
+ * existing key and did nothing. The package looked swept and was not, which is
+ * the worst available combination: an operator setting a short interval got no
+ * error, a moving clock, and a detection that had not run since the top of the
+ * hour.
+ *
+ * Widening it again is safe only alongside the CHECK constraint. The two are a
+ * pair: this may not exceed the shortest interval the database will accept.
+ */
+const DEFAULT_BUCKET_MS = 60_000;
 
 export class SweepScheduler {
   readonly #store: SweepStore;
