@@ -25,6 +25,7 @@
  */
 
 import pg from "pg";
+import { operatorConnectionString, OPERATOR_URL_VAR } from "./operator-connection.ts";
 
 export interface WatchOptions {
   readonly ecosystem?: string;
@@ -91,7 +92,7 @@ if (isEntrypoint) {
     (arg, i) => !arg.startsWith("--") && !(i > 0 && argv[i - 1]?.startsWith("--")),
   );
 
-  const connectionString = process.env["DATABASE_URL"];
+  const connectionString = operatorConnectionString();
   const packageName = positional[0];
   const baselineVersion = positional[1];
   const providerSlug = flag(argv, "provider") ?? process.env["DEFAULT_PROVIDER_SLUG"];
@@ -103,7 +104,7 @@ if (isEntrypoint) {
     "[--interval seconds] [--ecosystem npm]";
 
   if (!connectionString) {
-    console.error("DATABASE_URL is required");
+    console.error(`${OPERATOR_URL_VAR} or DATABASE_URL is required`);
     process.exit(1);
   }
   if (!packageName || !baselineVersion) {

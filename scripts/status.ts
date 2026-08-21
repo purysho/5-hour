@@ -26,6 +26,11 @@
  */
 
 import pg from "pg";
+import {
+  describeVisibility,
+  operatorConnectionString,
+  OPERATOR_URL_VAR,
+} from "./operator-connection.ts";
 
 export interface WatchedRow {
   readonly ecosystem: string;
@@ -78,6 +83,8 @@ export interface JobFailure {
 }
 
 export interface PipelineStatus {
+  /** Set when rows may be hidden by RLS rather than absent. */
+  readonly visibilityWarning: string | null;
   readonly enrolment: EnrolmentCounts;
   readonly watched: readonly WatchedRow[];
   readonly changes: readonly ChangeRow[];
@@ -90,6 +97,12 @@ export async function readStatus(connectionString: string): Promise<PipelineStat
   const client = new pg.Client({ connectionString });
   await client.connect();
   try {
+    // Asked before anything is counted. Every number below is a COUNT, and a
+    // COUNT under RLS returns zero rather than failing — so "nothing is
+    // enrolled" and "this role cannot see what is enrolled" print identically
+    // unless the difference is established first.
+    const visibility = await describeVisibility(client);
+
     // Counted rather than listed. "Is anything enrolled" is the question a
     // rollout that targeted nothing raises, and the answer is a number — while
     // listing customer repositories into a terminal is a disclosure nobody
@@ -167,6 +180,7 @@ export async function readStatus(connectionString: string): Promise<PipelineStat
     const enrolmentRow = enrolment.rows[0];
 
     return {
+      visibilityWarning: visibility.warning,
       enrolment: {
         consumers: Number(enrolmentRow?.consumers ?? 0),
         installations: Number(enrolmentRow?.installations ?? 0),
@@ -227,6 +241,11 @@ function ago(at: Date | null): string {
 
 export function render(status: PipelineStatus): string {
   const out: string[] = [];
+
+  // First, and unmissable. Everything after it is unreliable if this is set.
+  if (status.visibilityWarning) {
+    out.push("!! " + status.visibilityWarning, "");
+  }
 
   const e = status.enrolment;
   out.push("Enrolment");
@@ -332,9 +351,9 @@ const isEntrypoint =
   process.argv[1] !== undefined && import.meta.url === `file://${process.argv[1]}`;
 
 if (isEntrypoint) {
-  const connectionString = process.env["DATABASE_URL"];
+  const connectionString = operatorConnectionString();
   if (!connectionString) {
-    console.error("DATABASE_URL is required");
+    console.error(`${OPERATOR_URL_VAR} or DATABASE_URL is required`);
     process.exit(1);
   }
   console.log(render(await readStatus(connectionString)));

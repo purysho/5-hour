@@ -20,6 +20,7 @@
  */
 
 import pg from "pg";
+import { operatorConnectionString, OPERATOR_URL_VAR } from "./operator-connection.ts";
 
 export async function createProvider(
   connectionString: string,
@@ -48,12 +49,12 @@ const isEntrypoint =
   process.argv[1] !== undefined && import.meta.url === `file://${process.argv[1]}`;
 
 if (isEntrypoint) {
-  const connectionString = process.env["DATABASE_URL"];
+  const connectionString = operatorConnectionString();
   const slug = process.argv[2];
   const displayName = process.argv.slice(3).join(" ") || slug;
 
   if (!connectionString) {
-    console.error("DATABASE_URL is required");
+    console.error(`${OPERATOR_URL_VAR} or DATABASE_URL is required`);
     process.exit(1);
   }
   if (!slug || !/^[a-z0-9][a-z0-9-]{0,62}$/.test(slug)) {

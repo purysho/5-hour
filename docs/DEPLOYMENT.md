@@ -107,6 +107,28 @@ GRANT driftless_admin TO driftless_worker_login;
 
 Then point the two connection strings at them — `DATABASE_URL` at
 `driftless_app_login`, `PLATFORM_DATABASE_URL` at `driftless_worker_login`.
+
+**And a third, for the operator scripts.** `db:status`, `db:approve`,
+`db:watch`, `db:replan` and `db:provider` read and write tables RLS confines to
+a tenant. The app role reaches those rows only with `app.current_provider_id()`
+set, which a CLI cannot supply; `driftless_admin`'s cross-tenant policies cover
+`job` and `job_step` and nothing else, so on the rest it is denied by default.
+They run on the migration connection, as `db:provider` always documented:
+
+```
+ADMIN_DATABASE_URL = postgresql://postgres:<pw>@<host>:<port>/railway
+```
+
+Set it on whichever service you run those commands from. Without it they fall
+back to `DATABASE_URL`, which is right in development — both are the same
+superuser — and wrong in a production that has separated its roles.
+
+Wrong in a specific and quiet way: RLS filters rather than raising, so a script
+on the app role does not fail. It reports no watched packages, no changes and
+nothing awaiting approval, which is exactly what a correctly configured, idle
+deployment looks like. `db:status` checks whether it can see any provider and
+says so before printing anything else, but the other scripts cannot tell the
+difference between an empty result and a hidden one.
 They are different roles on purpose: the app role is RLS-confined, and the
 platform role is the narrow cross-tenant one the dequeue and the two
 minimal-disclosure lookups need (ADR-0010). One login for both is acceptable

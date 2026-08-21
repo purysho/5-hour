@@ -120,6 +120,7 @@ describe("pipeline status", () => {
     // before DEFAULT_PROVIDER_SLUG was set never enrolled and never will
     // without a reinstall.
     const output = render({
+      visibilityWarning: null,
       enrolment: {
         consumers: 0,
         installations: 0,
@@ -203,6 +204,31 @@ describe("pipeline status", () => {
     }
 
     expect(render(await readStatus(ADMIN_URL))).toContain("4 already queued");
+  });
+
+  it("warns when rows may be hidden rather than absent", async () => {
+    // RLS filters, it does not raise. A script pointed at the application role
+    // reports an empty system — no packages, no changes, nothing awaiting
+    // approval — which is indistinguishable from a healthy deployment with
+    // nothing to do, and is the reading an operator will accept.
+    const output = render({
+      visibilityWarning:
+        "Connected as driftless_app_login, which cannot see any provider.",
+      enrolment: {
+        consumers: 0,
+        installations: 0,
+        suspendedInstallations: 0,
+        repositories: 0,
+        archivedRepositories: 0,
+      },
+      watched: [],
+      changes: [],
+      jobs: [],
+      rollouts: [],
+      failures: [],
+    });
+    // First line, before any of the counts it undermines.
+    expect(output.split("\n")[0]).toContain("cannot see any provider");
   });
 
   it("prints why a failed job failed, not just that it did", async () => {

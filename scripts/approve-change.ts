@@ -26,6 +26,7 @@
  */
 
 import pg from "pg";
+import { operatorConnectionString, OPERATOR_URL_VAR } from "./operator-connection.ts";
 import { resolveChange } from "./resolve-change.ts";
 
 export interface PendingChange {
@@ -133,13 +134,13 @@ const isEntrypoint =
 
 if (isEntrypoint) {
   const argv = process.argv.slice(2);
-  const connectionString = process.env["DATABASE_URL"];
+  const connectionString = operatorConnectionString();
   const changeKey = argv[0]?.startsWith("--") ? undefined : argv[0];
   const approvedBy = flag(argv, "by");
   const providerSlug = flag(argv, "provider");
 
   if (!connectionString) {
-    console.error("DATABASE_URL is required");
+    console.error(`${OPERATOR_URL_VAR} or DATABASE_URL is required`);
     process.exit(1);
   }
 
