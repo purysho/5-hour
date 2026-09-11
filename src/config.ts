@@ -18,6 +18,8 @@
  *   incident does not put the GitHub App key in a log aggregator.
  */
 
+import type { PlanId } from "./billing/plans.ts";
+
 export class ConfigError extends Error {
   override readonly name = "ConfigError";
 }
@@ -97,6 +99,34 @@ export interface Config {
    * silently file one customer's repositories under another.
    */
   readonly defaultProviderSlug: string | null;
+  /**
+   * Billing, or null for a deployment that does not sell.
+   *
+   * All-or-nothing on purpose. A half-configured Stripe — a secret key with no
+   * webhook secret, say — produces a deployment that can take money and cannot
+   * hear that it was taken, so customers are charged and never provisioned.
+   * That failure is silent on our side and infuriating on theirs, so it is
+   * refused at startup instead.
+   *
+   * Null is a legitimate configuration: a single-tenant or self-hosted
+   * deployment enrols through DEFAULT_PROVIDER_SLUG and never sees a price.
+   */
+  readonly billing: {
+    readonly secretKey: Secret;
+    readonly webhookSecret: Secret;
+    readonly priceIds: Readonly<Record<PlanId, string>>;
+    /**
+     * Connects as a role granted `driftless_billing` and nothing else.
+     *
+     * Never the application role: that one cannot execute
+     * `provision_subscription` at all (migration 012), so pointing this at
+     * DATABASE_URL produces a permission error on the first paying customer.
+     * Never a role holding `driftless_app` as well — see non-negotiable 10.
+     */
+    readonly databaseUrl: Secret;
+    /** Where a paid customer is sent to install the App. */
+    readonly appInstallUrl: string;
+  } | null;
   readonly http: {
     readonly port: number;
     /** Public origin, used to build opt-out links. */
@@ -232,6 +262,79 @@ export function loadConfig(env: Env = process.env): Config {
     );
   }
 
+  // Billing. Absent entirely, or complete — see the Config comment for why a
+  // partial configuration is refused rather than defaulted.
+  const billingKeys = [
+    "STRIPE_SECRET_KEY",
+    "STRIPE_WEBHOOK_SECRET",
+    "STRIPE_PRICE_STARTER",
+    "STRIPE_PRICE_TEAM",
+    "STRIPE_PRICE_SCALE",
+    "BILLING_DATABASE_URL",
+    "GITHUB_APP_INSTALL_URL",
+  ] as const;
+  const billingPresent = billingKeys.filter((key) => (env[key]?.trim() ?? "") !== "");
+  let billing: Config["billing"] = null;
+
+  if (billingPresent.length > 0 && billingPresent.length < billingKeys.length) {
+    const missing = billingKeys.filter((key) => !billingPresent.includes(key));
+    problems.push(
+      `Billing is partially configured. Set all of these or none: missing ${missing.join(", ")}`,
+    );
+  } else if (billingPresent.length === billingKeys.length) {
+    const secretKey = require_("STRIPE_SECRET_KEY");
+    const stripeWebhookSecret = require_("STRIPE_WEBHOOK_SECRET");
+    const billingDatabaseUrl = require_("BILLING_DATABASE_URL");
+    const installUrl = require_("GITHUB_APP_INSTALL_URL");
+
+    // Prefix checks catch the two mistakes that actually happen: pasting a
+    // publishable key where a secret key goes (which fails on every API call
+    // with a confusing message), and pasting the webhook's *endpoint* id where
+    // its signing secret goes (which fails every signature, silently, forever).
+    if (secretKey && !secretKey.startsWith("sk_") && !secretKey.startsWith("rk_")) {
+      problems.push("STRIPE_SECRET_KEY must be a secret or restricted key (sk_ or rk_)");
+    }
+    if (stripeWebhookSecret && !stripeWebhookSecret.startsWith("whsec_")) {
+      problems.push("STRIPE_WEBHOOK_SECRET must be the signing secret (whsec_...)");
+    }
+    if (billingDatabaseUrl && billingDatabaseUrl === databaseUrl) {
+      problems.push(
+        "BILLING_DATABASE_URL must not equal DATABASE_URL — the application role " +
+          "cannot create tenants by construction (migration 012), and a role holding " +
+          "both sets of rights defeats tenant isolation (ADR-0010).",
+      );
+    }
+    if (installUrl) {
+      try {
+        const parsed = new URL(installUrl);
+        if (parsed.protocol !== "https:") {
+          problems.push("GITHUB_APP_INSTALL_URL must be https");
+        }
+      } catch {
+        problems.push("GITHUB_APP_INSTALL_URL must be a valid URL");
+      }
+    }
+
+    const priceIds: Record<PlanId, string> = {
+      starter: env["STRIPE_PRICE_STARTER"]?.trim() ?? "",
+      team: env["STRIPE_PRICE_TEAM"]?.trim() ?? "",
+      scale: env["STRIPE_PRICE_SCALE"]?.trim() ?? "",
+    };
+    for (const [plan, priceId] of Object.entries(priceIds)) {
+      if (!priceId.startsWith("price_")) {
+        problems.push(`STRIPE_PRICE_${plan.toUpperCase()} must be a price id (price_...)`);
+      }
+    }
+
+    billing = {
+      secretKey: new Secret(secretKey, "STRIPE_SECRET_KEY"),
+      webhookSecret: new Secret(stripeWebhookSecret, "STRIPE_WEBHOOK_SECRET"),
+      priceIds: Object.freeze(priceIds),
+      databaseUrl: new Secret(billingDatabaseUrl, "BILLING_DATABASE_URL"),
+      appInstallUrl: installUrl,
+    };
+  }
+
   const port = number_("PORT", 8080, 1, 65535);
   const concurrency = number_("WORKER_CONCURRENCY", 4, 1, 64);
   const pollIntervalMs = number_("WORKER_POLL_INTERVAL_MS", 1000, 100, 60_000);
@@ -257,6 +360,7 @@ export function loadConfig(env: Env = process.env): Config {
       apiKey: anthropicKey ? new Secret(anthropicKey, "ANTHROPIC_API_KEY") : null,
     },
     defaultProviderSlug,
+    billing,
     http: {
       port,
       publicOrigin: publicOrigin.replace(/\/+$/, ""),

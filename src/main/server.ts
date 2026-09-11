@@ -1,12 +1,18 @@
 /**
  * The HTTP server.
  *
- * Deliberately tiny. It exposes exactly four things — the public homepage, a
- * health check, the opt-out page, and the webhook receiver — and every one of
- * them is unauthenticated by necessity. There is no admin surface here and no
- * API; anything requiring authentication does not belong on this process.
+ * Deliberately tiny. Everything it exposes is unauthenticated by necessity:
+ * the homepage, a health check, the opt-out page, the forge webhook, and the
+ * commercial surface — pricing, checkout, and the Stripe webhook. There is no
+ * admin surface here and no API; anything requiring authentication does not
+ * belong on this process.
  *
- * Routing is hand-written rather than framework-driven. At four routes a
+ * The billing routes are absent, not disabled, when billing is unconfigured.
+ * A deployment that does not sell should 404 on /checkout rather than expose a
+ * route that fails at the Stripe call — an endpoint that exists and breaks is
+ * harder to reason about than one that was never mounted.
+ *
+ * Routing is hand-written rather than framework-driven. At this size a
  * framework is a dependency in the most exposed process we run, in exchange
  * for saving twenty lines.
  */
@@ -16,11 +22,19 @@ import { handleOptOut, type OptOutDeps } from "../http/opt-out.ts";
 import { landingResponse } from "../http/landing.ts";
 import { handleWebhook, type WebhookDeps } from "../http/webhook.ts";
 import { applyForgeEvent, type ApplyDeps } from "../http/webhook-apply.ts";
+import { pricingResponse, startCheckout, welcomeResponse, type CheckoutDeps } from "../http/pricing.ts";
+import { handleBillingWebhook, type BillingWebhookDeps } from "../http/billing-webhook.ts";
 
 export interface ServerDeps {
   readonly optOut: OptOutDeps;
   readonly webhook: WebhookDeps;
   readonly apply: ApplyDeps;
+  /** Absent when the deployment does not sell; the billing routes are then unmounted. */
+  readonly billing?: {
+    readonly checkout: CheckoutDeps;
+    readonly webhook: BillingWebhookDeps;
+    readonly appInstallUrl: string;
+  };
   /** Reports readiness. False makes /health fail so a load balancer drains us. */
   readonly ready: () => boolean;
   readonly log: (message: string, fields?: Record<string, unknown>) => void;
@@ -84,6 +98,111 @@ async function handleRequest(
     );
     res.writeHead(outcome.status, outcome.headers);
     res.end(outcome.body);
+    return;
+  }
+
+  const billing = deps.billing;
+
+  if (path === "/pricing" && (method === "GET" || method === "HEAD")) {
+    if (billing === undefined) {
+      res.writeHead(404, { "content-type": "text/plain" });
+      res.end("Not found\n");
+      return;
+    }
+    const page = pricingResponse();
+    res.writeHead(page.status, page.headers);
+    res.end(method === "HEAD" ? undefined : page.body);
+    return;
+  }
+
+  if (path === "/welcome" && (method === "GET" || method === "HEAD")) {
+    if (billing === undefined) {
+      res.writeHead(404, { "content-type": "text/plain" });
+      res.end("Not found\n");
+      return;
+    }
+    const page = welcomeResponse(billing.appInstallUrl);
+    res.writeHead(page.status, page.headers);
+    res.end(method === "HEAD" ? undefined : page.body);
+    return;
+  }
+
+  if (path === "/checkout") {
+    if (billing === undefined) {
+      res.writeHead(404, { "content-type": "text/plain" });
+      res.end("Not found\n");
+      return;
+    }
+    if (method !== "POST") {
+      res.writeHead(405, { allow: "POST" });
+      res.end();
+      return;
+    }
+    const form = parseForm(await readBody(req));
+    const outcome = await startCheckout(form["plan"], billing.checkout);
+    if (outcome.kind === "rejected") {
+      deps.log("checkout rejected", { reason: outcome.reason });
+      // Back to the page they came from rather than an error document. The
+      // only way to reach this is a tampered or stale form, and the useful
+      // response is the list of things that can actually be bought.
+      res.writeHead(303, { location: "/pricing", "cache-control": "no-store" });
+      res.end();
+      return;
+    }
+    // 303 so the browser follows with GET. A 302 here leaves the method
+    // technically at the browser's discretion, and a POST to Stripe's hosted
+    // checkout is not a page.
+    res.writeHead(303, { location: outcome.url, "cache-control": "no-store" });
+    res.end();
+    return;
+  }
+
+  if (path === "/webhooks/stripe") {
+    if (billing === undefined) {
+      res.writeHead(404, { "content-type": "text/plain" });
+      res.end("Not found\n");
+      return;
+    }
+    if (method !== "POST") {
+      res.writeHead(405, { allow: "POST" });
+      res.end();
+      return;
+    }
+
+    // The raw body, unparsed. The signature is over the bytes as sent, so
+    // anything that re-serialises the JSON invalidates every delivery.
+    const body = await readBody(req);
+    const outcome = await handleBillingWebhook(
+      { body, headers: normaliseHeaders(req) },
+      billing.webhook,
+    );
+
+    if (outcome.kind === "rejected") {
+      // 400 for the same reason as the forge webhook: telling an
+      // unauthenticated caller whether the signature or the body was wrong is
+      // free information about how we validate.
+      deps.log("billing webhook rejected", { reason: outcome.reason });
+      res.writeHead(400);
+      res.end();
+      return;
+    }
+
+    if (outcome.kind === "provisioned") {
+      deps.log("billing webhook provisioned tenant", {
+        eventId: outcome.eventId,
+        created: outcome.created,
+      });
+    } else if (outcome.kind === "duplicate") {
+      deps.log("billing webhook duplicate", { eventId: outcome.eventId });
+    } else {
+      deps.log("billing webhook ignored", { reason: outcome.reason });
+    }
+
+    // 200 on duplicates and ignored events. A non-2xx makes Stripe retry with
+    // backoff and eventually disable the endpoint, which would take billing
+    // down for events we deliberately do not act on.
+    res.writeHead(200);
+    res.end();
     return;
   }
 

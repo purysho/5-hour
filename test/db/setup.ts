@@ -102,6 +102,12 @@ export interface Fixture {
  * Uses the admin connection deliberately: seeding through the app role would
  * require tenant context to already exist, which is circular. Everything the
  * tests then *assert* runs through the app role.
+ *
+ * The seeded tenant carries an active subscription, because a seeded tenant is
+ * a customer — `authoriseOutboundWrite` refuses an unentitled one (migration
+ * 012), so a fixture without a subscription would make every outbound test
+ * assert the billing gate instead of the thing it was written for. Tests that
+ * want the unentitled paths call `setSubscriptionStatus` and say so.
  */
 export async function seedProvider(slug: string): Promise<Fixture> {
   const client = await adminClient();
@@ -143,6 +149,14 @@ export async function seedProvider(slug: string): Promise<Fixture> {
       [providerId, `${slug}-change-1`],
     );
 
+    await client.query(
+      `INSERT INTO subscription (
+         provider_id, stripe_customer_id, stripe_subscription_id, status, plan,
+         repository_limit, current_period_end, cancel_at_period_end
+       ) VALUES ($1, $2, $3, 'active', 'team', 50, now() + interval '30 days', false)`,
+      [providerId, `cus_${slug}`, `sub_${slug}`],
+    );
+
     return {
       slug,
       providerId,
@@ -158,3 +172,41 @@ export async function seedProvider(slug: string): Promise<Fixture> {
 
 export const SHA_A = "a".repeat(40);
 export const SHA_B = "b".repeat(40);
+
+/**
+ * Moves a seeded tenant's subscription into another state.
+ *
+ * `currentPeriodEnd` is settable because the dunning grace window is measured
+ * from it: a `past_due` tenant inside the window is still entitled, and one
+ * past it is not. Both cases need a period end chosen by the test rather than
+ * by the clock.
+ */
+export async function setSubscriptionStatus(
+  providerId: string,
+  status: string,
+  currentPeriodEnd: Date | null = null,
+): Promise<void> {
+  const client = await adminClient();
+  try {
+    await client.query(
+      `UPDATE subscription
+          SET status = $2,
+              current_period_end = COALESCE($3, current_period_end),
+              updated_at = now()
+        WHERE provider_id = $1`,
+      [providerId, status, currentPeriodEnd],
+    );
+  } finally {
+    await client.end();
+  }
+}
+
+/** Removes a tenant's subscription entirely — the never-paid case. */
+export async function removeSubscription(providerId: string): Promise<void> {
+  const client = await adminClient();
+  try {
+    await client.query("DELETE FROM subscription WHERE provider_id = $1", [providerId]);
+  } finally {
+    await client.end();
+  }
+}

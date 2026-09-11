@@ -10,6 +10,8 @@ import { loadConfig, Secret } from "../config.ts";
 import { Database } from "../db/client.ts";
 import { createHttpServer } from "./server.ts";
 import { hashToken } from "../outbound/suppression.ts";
+import { createStripeClient } from "../billing/stripe.ts";
+import { createBillingStore } from "../billing/provisioning.ts";
 
 const config = loadConfig();
 
@@ -24,15 +26,48 @@ const defaultProviderSlug = config.defaultProviderSlug;
 
 let draining = false;
 
+/**
+ * Billing, composed once or not at all.
+ *
+ * `config.billing` is null for a deployment that does not sell, and the store
+ * opens a connection pool with tenant-creation rights — so it is built only
+ * when there is something to sell. The pool is closed on drain alongside the
+ * main database.
+ */
+const billingStore =
+  config.billing === null ? null : createBillingStore(config.billing.databaseUrl);
+
 function log(message: string, fields: Record<string, unknown> = {}): void {
   // Structured, single line, no secrets. Secrets cannot reach here by
   // accident: Secret and ScopedToken both redact on serialisation.
   console.log(JSON.stringify({ level: "info", message, ...fields }));
 }
 
+const billingConfig = config.billing;
+
 const server = createHttpServer({
   ready: () => !draining,
   log,
+
+  ...(billingConfig === null || billingStore === null
+    ? {}
+    : {
+        billing: {
+          appInstallUrl: billingConfig.appInstallUrl,
+          checkout: {
+            stripe: createStripeClient(billingConfig.secretKey),
+            priceIds: billingConfig.priceIds,
+            publicOrigin: config.http.publicOrigin,
+            log,
+          },
+          webhook: {
+            secret: billingConfig.webhookSecret,
+            store: billingStore,
+            priceIds: billingConfig.priceIds,
+            log,
+          },
+        },
+      }),
 
   optOut: {
     withTenant: (providerId, fn) => db.withTenant(providerId, fn),
@@ -123,7 +158,9 @@ function shutdown(signal: string): void {
   log("draining", { signal });
 
   server.close(() => {
-    void db.close().then(() => process.exit(0));
+    void Promise.all([db.close(), billingStore?.close() ?? Promise.resolve()]).then(() =>
+      process.exit(0),
+    );
   });
 
   // Backstop. A hung keep-alive connection must not hold the process open past

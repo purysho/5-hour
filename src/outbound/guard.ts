@@ -1,5 +1,6 @@
 import type { TenantClient } from "../db/client.ts";
 import { checkSuppression, type SuppressionTarget } from "./suppression.ts";
+import { entitlementFor } from "../billing/entitlement.ts";
 
 /**
  * The last gate before anything is written to a customer repository
@@ -12,8 +13,9 @@ import { checkSuppression, type SuppressionTarget } from "./suppression.ts";
  *
  *   1. the global kill switch    — stop everything, no deploy required
  *   2. suppression               — someone told us to stop; that is final
- *   3. per-installation ceilings — bound the damage to one customer
- *   4. the idempotency claim     — the exactly-once guarantee itself
+ *   3. entitlement               — somebody has to be paying for this
+ *   4. per-installation ceilings — bound the damage to one customer
+ *   5. the idempotency claim     — the exactly-once guarantee itself
  *
  * Order matters, and each position is deliberate.
  *
@@ -25,12 +27,22 @@ import { checkSuppression, type SuppressionTarget } from "./suppression.ts";
  * request we open promises "one click, no account, and we will not open
  * another pull request here"; a suppressed target must not consume a claim
  * either, so that lifting a suppression later leaves the work still doable.
+ *
+ * Entitlement sits third for the same structural reason and a commercial one.
+ * Structural: like suppression, it must not consume a claim — a tenant whose
+ * card failed on Tuesday and who pays on Thursday must find the work still
+ * doable, and a consumed claim would silently skip it forever. Commercial:
+ * this is the only place the product can be withheld. Driftless delivers value
+ * by opening a pull request and by no other means, so an unentitled tenant
+ * that gets past this line gets the entire product for free. Every other
+ * enforcement point would be decoration around this one.
  */
 
 export type OutboundDecision =
   | { allowed: true; writeId: string; attempts: number }
   | { allowed: false; reason: "kill-switch"; detail: string }
   | { allowed: false; reason: "suppressed"; detail: string }
+  | { allowed: false; reason: "not-entitled"; detail: string }
   | { allowed: false; reason: "rate-limit"; detail: string }
   | {
       allowed: false;
@@ -88,6 +100,18 @@ export async function authoriseOutboundWrite(
       detail:
         `${suppression.scope}-scoped opt-out recorded ${suppression.since}; ` +
         `no further pull requests will be opened here`,
+    };
+  }
+
+  // Third brake. Consumes no claim, for the reason in the header: a lapsed
+  // subscription is routinely temporary, and the work must still be doable
+  // when it is paid.
+  const entitlement = await entitlementFor(client);
+  if (!entitlement.entitled) {
+    return {
+      allowed: false,
+      reason: "not-entitled",
+      detail: `${entitlement.reason}: ${entitlement.detail}`,
     };
   }
 
