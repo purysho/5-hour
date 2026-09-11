@@ -45,6 +45,10 @@ export default async function setup(): Promise<void> {
     for (const [login, grant] of [
       ["driftless_app_login", "driftless_app"],
       ["driftless_worker_login", "driftless_admin"],
+      // A third, for the same reason there are two: billing can create
+      // tenants and must not be able to read them. Holding it together with
+      // either of the others would OR the policies and defeat the boundary.
+      ["driftless_billing_login", "driftless_billing"],
     ] as const) {
       await admin.query(`
         DO $$ BEGIN

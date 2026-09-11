@@ -89,7 +89,7 @@ export function createBillingStore(connectionString: Secret, max = 2): BillingSt
       const client = await pool.connect();
       try {
         const { rows } = await client.query<{ provider_id: string; created: boolean }>(
-          `SELECT provider_id, created
+          `SELECT provisioned_provider_id AS provider_id, was_created AS created
              FROM provision_subscription($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
           [
             request.slug,

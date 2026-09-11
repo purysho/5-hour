@@ -43,6 +43,8 @@ export function withUser(connectionString: string, user: string): string {
 
 export const APP_URL = withUser(ADMIN_URL, "driftless_app_login");
 export const PLATFORM_URL = withUser(ADMIN_URL, "driftless_worker_login");
+/** Tenant-creation rights and nothing else. See migration 012. */
+export const BILLING_URL = withUser(ADMIN_URL, "driftless_billing_login");
 
 /**
  * Retained so test files read declaratively. Schema preparation already
@@ -180,6 +182,12 @@ export const SHA_B = "b".repeat(40);
  * from it: a `past_due` tenant inside the window is still entitled, and one
  * past it is not. Both cases need a period end chosen by the test rather than
  * by the clock.
+ *
+ * An upsert rather than an update, so it can also be used to *restore* a
+ * subscription after `removeSubscription` — the "they lapsed, then they paid"
+ * sequence, which is the case the no-claim-consumed guarantee exists for. As a
+ * plain UPDATE it silently affected no rows and the test read as a product bug
+ * rather than a fixture one.
  */
 export async function setSubscriptionStatus(
   providerId: string,
@@ -189,12 +197,16 @@ export async function setSubscriptionStatus(
   const client = await adminClient();
   try {
     await client.query(
-      `UPDATE subscription
-          SET status = $2,
-              current_period_end = COALESCE($3, current_period_end),
-              updated_at = now()
-        WHERE provider_id = $1`,
-      [providerId, status, currentPeriodEnd],
+      `INSERT INTO subscription (
+         provider_id, stripe_customer_id, stripe_subscription_id, status, plan,
+         repository_limit, current_period_end, cancel_at_period_end
+       ) VALUES ($1, $2, $3, $4, 'team', 50,
+                 COALESCE($5, now() + interval '30 days'), false)
+       ON CONFLICT (provider_id) DO UPDATE
+          SET status = EXCLUDED.status,
+              current_period_end = COALESCE($5, subscription.current_period_end),
+              updated_at = now()`,
+      [providerId, `cus_${providerId}`, `sub_${providerId}`, status, currentPeriodEnd],
     );
   } finally {
     await client.end();

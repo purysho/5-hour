@@ -37,13 +37,24 @@
 -- visibility with no error and nothing to see in review. Billing needs to
 -- create tenants; it has no business reading their repositories.
 --
--- ── Why keyed on the Stripe subscription id ─────────────────────────────────
+-- ── Why redelivery converges ────────────────────────────────────────────────
 --
 -- Stripe redelivers. A webhook handler that is not idempotent creates a second
 -- tenant for a customer who paid once, and the duplicate is invisible until
 -- that customer's repositories are split across two tenants that cannot see
--- each other. `stripe_subscription_id` is unique and the provisioning path is
--- an upsert on it, so redelivery converges rather than accumulating.
+-- each other. The tenant is resolved from `stripe_subscription_id` before
+-- anything is written, so redelivery lands on the row it already wrote.
+--
+-- ── Why the subscription upsert keys on the tenant, not the subscription ────
+--
+-- Because a customer who cancels and comes back is a customer. They arrive
+-- with a *new* Stripe subscription id and the same email, so the slug resolves
+-- to the tenant they already have — and an upsert keyed on the subscription id
+-- would then try to insert a second subscription row for that tenant and hit
+-- `subscription_one_per_provider`. The webhook would 500, Stripe would retry
+-- until it disabled the endpoint, and someone who had just paid would never be
+-- provisioned. Keying on `provider_id` makes the new subscription replace the
+-- old one, which is what "one live subscription per tenant" means.
 
 -- ---------------------------------------------------------------------------
 -- The billing role
@@ -158,7 +169,12 @@ CREATE FUNCTION provision_subscription(
   p_current_period_end      timestamptz,
   p_cancel_at_period_end    boolean
 )
-RETURNS TABLE (provider_id uuid, created boolean)
+-- The output columns are named distinctly from the table columns they carry.
+-- A RETURNS TABLE column named `provider_id` shadows `subscription.provider_id`
+-- inside the body, and `ON CONFLICT (provider_id)` below then fails to resolve
+-- with "column reference is ambiguous" — at runtime, on the first real
+-- customer, since nothing catches it at creation time.
+RETURNS TABLE (provisioned_provider_id uuid, was_created boolean)
 LANGUAGE plpgsql
 SECURITY DEFINER
 SET search_path = public, pg_temp
@@ -190,14 +206,19 @@ BEGIN
     v_provider_id, p_stripe_customer_id, p_stripe_subscription_id, p_status,
     p_plan, p_repository_limit, p_current_period_end, p_cancel_at_period_end, now()
   )
-  ON CONFLICT (stripe_subscription_id) DO UPDATE
-     SET status               = EXCLUDED.status,
-         plan                 = EXCLUDED.plan,
-         repository_limit     = EXCLUDED.repository_limit,
-         current_period_end   = EXCLUDED.current_period_end,
-         cancel_at_period_end = EXCLUDED.cancel_at_period_end,
-         stripe_customer_id   = EXCLUDED.stripe_customer_id,
-         updated_at           = now();
+  ON CONFLICT (provider_id) DO UPDATE
+     SET status                 = EXCLUDED.status,
+         plan                   = EXCLUDED.plan,
+         repository_limit       = EXCLUDED.repository_limit,
+         current_period_end     = EXCLUDED.current_period_end,
+         cancel_at_period_end   = EXCLUDED.cancel_at_period_end,
+         stripe_customer_id     = EXCLUDED.stripe_customer_id,
+         -- Replaced, not preserved: a returning customer's new subscription is
+         -- the live one. The unique index on stripe_subscription_id still
+         -- holds, and cannot be violated here — a subscription already
+         -- attached to another tenant would have been resolved above.
+         stripe_subscription_id = EXCLUDED.stripe_subscription_id,
+         updated_at             = now();
 
   RETURN QUERY SELECT v_provider_id, v_created;
 END;
