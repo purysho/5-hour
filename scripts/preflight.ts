@@ -275,10 +275,14 @@ if (config && signer && app) {
 
 // ── 6. Database roles ───────────────────────────────────────────────────────
 //
-// ADR-0010: no login role may hold both `driftless_app` and `driftless_admin`.
-// Postgres ORs together the policies of every role you belong to, so combining
-// them grants cross-tenant visibility with no error and nothing to see in
-// review — which makes it exactly the kind of thing a check has to catch.
+// ADR-0010: no login role may hold more than one of `driftless_app`,
+// `driftless_admin` and `driftless_billing`. Postgres ORs together the policies
+// of every role you belong to, so combining any two grants privileges neither
+// was meant to carry — with no error and nothing to see in review, which makes
+// it exactly the kind of thing a check has to catch.
+//
+// `driftless_billing` (migration 012) can create tenants and read none. Held
+// alongside `driftless_app` it would be able to do both.
 
 /** The schema is a property of the database, not of whoever connected to it. */
 let checkedMigrations = false;
@@ -295,6 +299,23 @@ if (config) {
       "PLATFORM_DATABASE_URL is unset, so both roles are the same login — " +
         "acceptable in development, never in production (ADR-0010)",
     );
+  }
+
+  // Only when the deployment sells. A deployment with no billing has no
+  // billing role, and reporting its absence as a problem would be noise.
+  if (config.billing !== null) {
+    const billing = Secret.reveal(config.billing.databaseUrl);
+    if (billing === Secret.reveal(config.databaseUrl)) {
+      record(
+        "fail",
+        "billing role",
+        "BILLING_DATABASE_URL equals DATABASE_URL — the application role cannot " +
+          "execute provision_subscription (migration 012), so the first paying " +
+          "customer fails to provision",
+      );
+    } else {
+      await checkRole("billing role", billing);
+    }
   }
 }
 
@@ -334,15 +355,19 @@ async function checkRole(label: string, connectionString: string): Promise<void>
        WHERE u.rolname = current_user`,
     );
     const held = memberships.map((m) => m.rolname);
-    const both = held.includes("driftless_app") && held.includes("driftless_admin");
+    // Any two of the three is a failure, not just app+admin. Enumerated rather
+    // than special-cased so that adding a fourth group role cannot quietly
+    // escape the check.
+    const groupRoles = ["driftless_app", "driftless_admin", "driftless_billing"];
+    const combined = groupRoles.filter((group) => held.includes(group));
 
     record(
-      both ? "fail" : "pass",
+      combined.length > 1 ? "fail" : "pass",
       label,
-      both
-        ? `${role.current_user} holds both driftless_app and driftless_admin — ` +
-          "Postgres ORs their policies together, silently granting cross-tenant " +
-          "visibility (ADR-0010)"
+      combined.length > 1
+        ? `${role.current_user} holds ${combined.join(" and ")} — Postgres ORs ` +
+          "their policies together, silently granting privileges neither was " +
+          "meant to carry (ADR-0010)"
         : `${role.current_user}, member of ${held.join(", ") || "no group role"}`,
     );
 

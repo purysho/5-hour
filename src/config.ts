@@ -126,6 +126,17 @@ export interface Config {
     readonly databaseUrl: Secret;
     /** Where a paid customer is sent to install the App. */
     readonly appInstallUrl: string;
+    /**
+     * Stripe's hosted customer portal login page.
+     *
+     * A URL rather than a session minted per request, because minting one
+     * needs to know *which* customer is asking, and this process has no
+     * authenticated surface to learn that from. Stripe's login page takes the
+     * customer's email and mails them a link, which keeps the identity
+     * question on Stripe's side — and avoids an endpoint that would otherwise
+     * confirm whether a given email is a customer.
+     */
+    readonly portalUrl: string;
   } | null;
   readonly http: {
     readonly port: number;
@@ -272,6 +283,7 @@ export function loadConfig(env: Env = process.env): Config {
     "STRIPE_PRICE_SCALE",
     "BILLING_DATABASE_URL",
     "GITHUB_APP_INSTALL_URL",
+    "STRIPE_PORTAL_URL",
   ] as const;
   const billingPresent = billingKeys.filter((key) => (env[key]?.trim() ?? "") !== "");
   let billing: Config["billing"] = null;
@@ -286,6 +298,7 @@ export function loadConfig(env: Env = process.env): Config {
     const stripeWebhookSecret = require_("STRIPE_WEBHOOK_SECRET");
     const billingDatabaseUrl = require_("BILLING_DATABASE_URL");
     const installUrl = require_("GITHUB_APP_INSTALL_URL");
+    const portalUrl = require_("STRIPE_PORTAL_URL");
 
     // Prefix checks catch the two mistakes that actually happen: pasting a
     // publishable key where a secret key goes (which fails on every API call
@@ -304,14 +317,15 @@ export function loadConfig(env: Env = process.env): Config {
           "both sets of rights defeats tenant isolation (ADR-0010).",
       );
     }
-    if (installUrl) {
+    for (const [key, value] of [
+      ["GITHUB_APP_INSTALL_URL", installUrl],
+      ["STRIPE_PORTAL_URL", portalUrl],
+    ] as const) {
+      if (!value) continue;
       try {
-        const parsed = new URL(installUrl);
-        if (parsed.protocol !== "https:") {
-          problems.push("GITHUB_APP_INSTALL_URL must be https");
-        }
+        if (new URL(value).protocol !== "https:") problems.push(`${key} must be https`);
       } catch {
-        problems.push("GITHUB_APP_INSTALL_URL must be a valid URL");
+        problems.push(`${key} must be a valid URL`);
       }
     }
 
@@ -332,6 +346,7 @@ export function loadConfig(env: Env = process.env): Config {
       priceIds: Object.freeze(priceIds),
       databaseUrl: new Secret(billingDatabaseUrl, "BILLING_DATABASE_URL"),
       appInstallUrl: installUrl,
+      portalUrl,
     };
   }
 

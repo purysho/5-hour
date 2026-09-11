@@ -137,6 +137,97 @@ in development and is the thing being avoided in production.
 `pnpm preflight` checks both, and fails rather than warns on a superuser — it
 is the one check that cannot be inferred from behaviour afterwards.
 
+### The third login role — billing
+
+Creating a tenant is deliberately impossible for the application role: the RLS
+policy on `provider` checks `id = app.current_provider_id()`, and a row that
+does not exist yet cannot satisfy it (ADR-0005). Self-serve checkout therefore
+runs as a third role, which can call `provision_subscription` and can read
+nothing.
+
+```sql
+CREATE ROLE driftless_billing_login LOGIN
+  NOSUPERUSER NOCREATEDB NOCREATEROLE NOBYPASSRLS INHERIT;
+GRANT driftless_billing TO driftless_billing_login;
+\password driftless_billing_login
+```
+
+Three roles, none of them holding more than one grant. A role holding both
+`driftless_billing` and `driftless_app` would be able to create tenants *and*
+read across them, and Postgres would report nothing: it ORs together the
+policies of every role you belong to. `pnpm preflight` checks the separation.
+
+Point `BILLING_DATABASE_URL` at this role. Startup refuses if it equals
+`DATABASE_URL`.
+
+## Billing
+
+Skip this section entirely for a single-tenant or self-hosted deployment.
+Leaving every `STRIPE_*` variable unset is valid, and the commercial routes are
+then not mounted.
+
+### 1. Create the products
+
+Three prices, monthly recurring, matching `src/billing/plans.ts`:
+
+| Plan | Price | Repositories |
+|---|---|---|
+| Starter | $49/month | 10 |
+| Team | $199/month | 50 |
+| Scale | $499/month | 200 |
+
+The repository limit is enforced from the plan in the code, not from Stripe, so
+a price created at a different amount sells a tier we do not implement. Change
+both or neither.
+
+### 2. Create a restricted key
+
+Stripe → Developers → API keys → restricted key, with write access to
+**Checkout Sessions** and **Billing Portal Sessions** and nothing else. That is
+the entire set of operations this process performs. A full secret key here can
+issue refunds from an internet-facing process.
+
+### 3. Register the webhook endpoint
+
+Point it at `https://<your-origin>/webhooks/stripe` and subscribe to exactly
+four events:
+
+- `checkout.session.completed`
+- `customer.subscription.created`
+- `customer.subscription.updated`
+- `customer.subscription.deleted`
+
+Everything else is ignored without being claimed. Copy the **signing secret**
+(`whsec_...`) — not the endpoint id — into `STRIPE_WEBHOOK_SECRET`.
+
+### 4. Verify the path end to end before announcing it
+
+In test mode, with the test price ids configured:
+
+```bash
+# Pay with card 4242 4242 4242 4242, any future expiry, any CVC.
+open https://<your-origin>/pricing
+
+# The tenant should now exist, created by the webhook and not by a human.
+ADMIN_DATABASE_URL=... pnpm db:status
+```
+
+If the tenant does not appear, the cause is almost always one of two things:
+the signing secret is the endpoint id rather than the secret, or
+`BILLING_DATABASE_URL` points at a role without `driftless_billing`. Both fail
+loudly in the server log and neither fails at startup, because neither is
+knowable until a delivery arrives.
+
+### What happens when a customer stops paying
+
+`customer.subscription.updated` moves the subscription to `past_due`, and
+Driftless keeps working through a seven-day grace window measured from the
+period end — a card usually fails for reasons unrelated to intent to pay, and
+Stripe retries over several days. After that, and immediately on `canceled` or
+`unpaid`, `authoriseOutboundWrite` refuses and no further pull requests are
+opened. Nothing is deleted, and no idempotency claim is consumed, so a customer
+who returns finds the outstanding work still doable.
+
 ### Enrolment
 
 Installing the GitHub App is not enough to onboard anyone, and the failure is
@@ -292,7 +383,8 @@ new rollout.
 
 ```bash
 pnpm db:migrate                          # schema, group roles, RLS
-# create the two login roles (above), then point the URLs at them
+# create the login roles (above: app, worker, and billing if you sell),
+# then point the URLs at them
 pnpm preflight                           # proves the App and the roles work
 pnpm db:provider acme "Acme Inc"         # the paying tenant
 # set DEFAULT_PROVIDER_SLUG=acme on both services, then install the App

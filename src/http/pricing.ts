@@ -34,12 +34,12 @@ const SECURITY_HEADERS: Readonly<Record<string, string>> = Object.freeze({
   "strict-transport-security": "max-age=63072000; includeSubDomains",
 });
 
-export function pricingResponse(): {
+export function pricingResponse(portalUrl: string): {
   status: number;
   headers: Readonly<Record<string, string>>;
   body: string;
 } {
-  return { status: 200, headers: SECURITY_HEADERS, body: renderPricing() };
+  return { status: 200, headers: SECURITY_HEADERS, body: renderPricing(portalUrl) };
 }
 
 export interface CheckoutDeps {
@@ -90,7 +90,7 @@ export async function startCheckout(
  * kind of small lie that produces a support ticket. It tells the customer the
  * one thing they must now do, which is install the GitHub App.
  */
-export function welcomeResponse(installUrl: string): {
+export function welcomeResponse(installUrl: string, portalUrl: string): {
   status: number;
   headers: Readonly<Record<string, string>>;
   body: string;
@@ -98,7 +98,7 @@ export function welcomeResponse(installUrl: string): {
   return {
     status: 200,
     headers: { ...SECURITY_HEADERS, "cache-control": "no-store" },
-    body: renderWelcome(installUrl),
+    body: renderWelcome(installUrl, portalUrl),
   };
 }
 
@@ -153,7 +153,7 @@ function planCard(plan: Plan): string {
     </section>`;
 }
 
-function renderPricing(): string {
+function renderPricing(portalUrl: string): string {
   const cards = Object.values(PLANS).map(planCard).join("");
   return `<!doctype html>
 <html lang="en">
@@ -187,7 +187,7 @@ function renderPricing(): string {
 </html>`;
 }
 
-function renderWelcome(installUrl: string): string {
+function renderWelcome(installUrl: string, portalUrl: string): string {
   return `<!doctype html>
 <html lang="en">
 <head>
@@ -208,6 +208,7 @@ function renderWelcome(installUrl: string): string {
     Choose the repositories you want covered — you can change the selection at
     any time from GitHub, and removing the App revokes our access immediately.
     If you closed this page, the same link is in your receipt.
+    <a href="${escapeHtml(portalUrl)}">Manage billing</a>.
   </p>
 </main>
 </body>

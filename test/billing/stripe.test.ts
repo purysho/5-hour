@@ -196,9 +196,17 @@ describe("the Stripe API client", () => {
   });
 
   it("throws when Stripe returns HTML instead of JSON", async () => {
+    // A gateway error page is a 200 with a body that is not JSON. Parsing it
+    // as a session would redirect the customer to `undefined`.
     const { impl } = stubFetch(200, "<html>maintenance</html>");
     await expect(
-      createStripeClient(key, impl).createPortalSession("cus_1", "https://driftless.dev/"),
+      createStripeClient(key, impl).createCheckoutSession({
+        priceId: "price_team",
+        planId: "team",
+        successUrl: "s",
+        cancelUrl: "c",
+        clientReferenceId: "r",
+      }),
     ).rejects.toThrow(StripeApiError);
   });
 

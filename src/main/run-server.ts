@@ -54,6 +54,7 @@ const server = createHttpServer({
     : {
         billing: {
           appInstallUrl: billingConfig.appInstallUrl,
+          portalUrl: billingConfig.portalUrl,
           checkout: {
             stripe: createStripeClient(billingConfig.secretKey),
             priceIds: billingConfig.priceIds,

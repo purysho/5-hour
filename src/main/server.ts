@@ -34,6 +34,7 @@ export interface ServerDeps {
     readonly checkout: CheckoutDeps;
     readonly webhook: BillingWebhookDeps;
     readonly appInstallUrl: string;
+    readonly portalUrl: string;
   };
   /** Reports readiness. False makes /health fail so a load balancer drains us. */
   readonly ready: () => boolean;
@@ -109,7 +110,7 @@ async function handleRequest(
       res.end("Not found\n");
       return;
     }
-    const page = pricingResponse();
+    const page = pricingResponse(billing.portalUrl);
     res.writeHead(page.status, page.headers);
     res.end(method === "HEAD" ? undefined : page.body);
     return;
@@ -121,7 +122,7 @@ async function handleRequest(
       res.end("Not found\n");
       return;
     }
-    const page = welcomeResponse(billing.appInstallUrl);
+    const page = welcomeResponse(billing.appInstallUrl, billing.portalUrl);
     res.writeHead(page.status, page.headers);
     res.end(method === "HEAD" ? undefined : page.body);
     return;

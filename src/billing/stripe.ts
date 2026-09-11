@@ -163,7 +163,6 @@ export interface CheckoutSessionRequest {
 
 export interface StripeClient {
   createCheckoutSession(request: CheckoutSessionRequest): Promise<{ url: string }>;
-  createPortalSession(customerId: string, returnUrl: string): Promise<{ url: string }>;
 }
 
 export class StripeApiError extends Error {
@@ -240,18 +239,6 @@ export function createStripeClient(
       const url = body["url"];
       if (typeof url !== "string" || url === "") {
         throw new StripeApiError(200, "Stripe checkout session has no URL");
-      }
-      return { url };
-    },
-
-    async createPortalSession(customerId, returnUrl) {
-      const body = await post("/billing_portal/sessions", {
-        customer: customerId,
-        return_url: returnUrl,
-      });
-      const url = body["url"];
-      if (typeof url !== "string" || url === "") {
-        throw new StripeApiError(200, "Stripe portal session has no URL");
       }
       return { url };
     },
