@@ -49,6 +49,7 @@ function provisionRequest(slug: string, overrides: Record<string, unknown> = {})
     plan: PLANS.team,
     currentPeriodEnd: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000),
     cancelAtPeriodEnd: false,
+    enrolmentRefHash: null,
     ...overrides,
   };
 }
@@ -155,6 +156,26 @@ describe("the event claim", () => {
     const eventId = `evt_${Date.now()}`;
     expect(await store.claimEvent(eventId, "customer.subscription.created")).toBe(true);
     expect(await store.claimEvent(eventId, "customer.subscription.created")).toBe(false);
+  });
+
+  it("can be released by the billing role, which needs the DELETE grant", async () => {
+    // The in-memory fake in the webhook tests proves the handler calls this.
+    // Only this proves the role is actually permitted to, and a missing grant
+    // would fail exactly where it matters least visibly: inside the error path
+    // of a provisioning failure.
+    const eventId = `evt_release_${Date.now()}`;
+    expect(await store.claimEvent(eventId, "customer.subscription.created")).toBe(true);
+
+    await store.releaseEvent(eventId);
+
+    // Released, so Stripe's retry can do the work the failed delivery did not.
+    expect(await store.claimEvent(eventId, "customer.subscription.created")).toBe(true);
+  });
+
+  it("releasing an event that was never claimed is not an error", async () => {
+    // The release runs in a failure path. If it could throw on a claim that is
+    // already gone, it would replace the real error with its own.
+    await expect(store.releaseEvent(`evt_absent_${Date.now()}`)).resolves.toBeUndefined();
   });
 
   it("resolves a race in the database rather than in application code", async () => {

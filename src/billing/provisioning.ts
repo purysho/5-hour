@@ -28,6 +28,14 @@ export interface ProvisionRequest {
   readonly plan: Plan;
   readonly currentPeriodEnd: Date | null;
   readonly cancelAtPeriodEnd: boolean;
+  /**
+   * SHA-256 of the checkout reference, or null.
+   *
+   * Only `checkout.session.completed` carries one — it is the event Stripe
+   * echoes `client_reference_id` back on. Subscription events pass null, and
+   * the function keeps whichever reference arrived first.
+   */
+  readonly enrolmentRefHash: string | null;
 }
 
 export interface ProvisionResult {
@@ -46,6 +54,14 @@ export interface BillingStore {
    * interleave.
    */
   claimEvent(eventId: string, eventType: string): Promise<boolean>;
+  /**
+   * Releases a claim whose processing failed.
+   *
+   * Without this, a transient failure during provisioning is permanent: the
+   * claim survives, Stripe's retry is dismissed as a duplicate, and a paying
+   * customer is never provisioned while Stripe is told the delivery succeeded.
+   */
+  releaseEvent(eventId: string): Promise<void>;
   close(): Promise<void>;
 }
 
@@ -90,7 +106,7 @@ export function createBillingStore(connectionString: Secret, max = 2): BillingSt
       try {
         const { rows } = await client.query<{ provider_id: string; created: boolean }>(
           `SELECT provisioned_provider_id AS provider_id, was_created AS created
-             FROM provision_subscription($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
+             FROM provision_subscription($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`,
           [
             request.slug,
             request.displayName,
@@ -101,6 +117,7 @@ export function createBillingStore(connectionString: Secret, max = 2): BillingSt
             request.plan.repositoryLimit,
             request.currentPeriodEnd,
             request.cancelAtPeriodEnd,
+            request.enrolmentRefHash,
           ],
         );
         const row = rows[0];
@@ -121,6 +138,15 @@ export function createBillingStore(connectionString: Secret, max = 2): BillingSt
           [eventId, eventType],
         );
         return rowCount === 1;
+      } finally {
+        client.release();
+      }
+    },
+
+    async releaseEvent(eventId) {
+      const client = await pool.connect();
+      try {
+        await client.query("DELETE FROM billing_event WHERE event_id = $1", [eventId]);
       } finally {
         client.release();
       }

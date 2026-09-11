@@ -10,6 +10,7 @@ import { loadConfig, Secret } from "../config.ts";
 import { Database } from "../db/client.ts";
 import { createHttpServer } from "./server.ts";
 import { hashToken } from "../outbound/suppression.ts";
+import { recordEnrolment } from "../http/webhook-apply.ts";
 import { createStripeClient } from "../billing/stripe.ts";
 import { createBillingStore } from "../billing/provisioning.ts";
 
@@ -55,6 +56,71 @@ const server = createHttpServer({
         billing: {
           appInstallUrl: billingConfig.appInstallUrl,
           portalUrl: billingConfig.portalUrl,
+
+          // Binding a payment to an installation. The only request in which
+          // both facts exist — see src/http/setup.ts.
+          setup: {
+            log,
+            providerForEnrolmentRef: async (refHash) => {
+              const rows = await db.withPlatformContext("enrolment ref lookup", (client) =>
+                client
+                  .query<{ provider_id: string | null }>(
+                    "SELECT provider_id_for_enrolment_ref($1) AS provider_id",
+                    [refHash],
+                  )
+                  .then((r) => r.rows),
+              );
+              return rows[0]?.provider_id ?? null;
+            },
+
+            // Taken, not read: the row is deleted as it is returned, so two
+            // concurrent setup callbacks for one installation cannot both
+            // drain it.
+            takePendingInstallation: async (forgeInstallationId) => {
+              const rows = await db.withPlatformContext("drain parked installation", (client) =>
+                client
+                  .query<{ account: string; repositories: unknown }>(
+                    `DELETE FROM pending_installation
+                           WHERE forge_installation_id = $1
+                       RETURNING account, repositories`,
+                    [forgeInstallationId],
+                  )
+                  .then((r) => r.rows),
+              );
+              const row = rows[0];
+              if (!row) return null;
+              return {
+                account: row.account,
+                repositories: Array.isArray(row.repositories) ? row.repositories : [],
+              };
+            },
+
+            enrol: async (providerId, forgeInstallationId, pending) => {
+              await db.withTenant(providerId, (client) =>
+                recordEnrolment(
+                  client,
+                  providerId,
+                  // No parked delivery means the webhook has not arrived yet.
+                  // The account is unknown at this moment, so the installation
+                  // id stands in for it — the `installation.created` webhook
+                  // that follows resolves to this tenant and corrects it.
+                  pending?.account ?? `installation-${forgeInstallationId}`,
+                  forgeInstallationId,
+                  pending?.repositories ?? [],
+                ),
+              );
+            },
+
+            // Single-use. A reference is a bearer credential for binding an
+            // installation to this tenant, and it has now been spent.
+            consumeEnrolmentRef: async (providerId) => {
+              await db.withTenant(providerId, (client) =>
+                client.query("UPDATE provider SET enrolment_ref_hash = NULL WHERE id = $1", [
+                  providerId,
+                ]),
+              );
+            },
+          },
           checkout: {
             stripe: createStripeClient(billingConfig.secretKey),
             priceIds: billingConfig.priceIds,
@@ -123,6 +189,27 @@ const server = createHttpServer({
                 .then((r) => r.rows),
             );
             return rows[0]?.provider_id ?? null;
+          },
+        }),
+    // Self-serve deployments park an installation whose tenant is not yet
+    // known; the setup callback claims it. Absent when billing is off, where
+    // DEFAULT_PROVIDER_SLUG answers the question instead.
+    ...(billingConfig === null
+      ? {}
+      : {
+          parkInstallation: async (forgeInstallationId, account, repositories) => {
+            await db.withPlatformContext("park installation", (client) =>
+              client.query(
+                `INSERT INTO pending_installation
+                       (forge_installation_id, account, repositories)
+                     VALUES ($1, $2, $3::jsonb)
+                ON CONFLICT (forge_installation_id) DO UPDATE
+                   SET account = EXCLUDED.account,
+                       repositories = EXCLUDED.repositories,
+                       received_at = now()`,
+                [forgeInstallationId, account, JSON.stringify(repositories)],
+              ),
+            );
           },
         }),
     providerForInstallation: async (forgeInstallationId) => {

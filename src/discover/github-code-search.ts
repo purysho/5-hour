@@ -312,11 +312,17 @@ export class GitHubCodeSearchCrawler {
       // depends on, and discovery's answer is the one nobody reviews.
       dependencies = parseManifest(manifestSource).dependencies;
     } catch (error) {
-      // The reason, never the contents: a manifest is attacker-authored, and
-      // this line goes to an operator's terminal.
-      return skip(
-        error instanceof ManifestError ? `unparseable manifest: ${error.message}` : "unparseable manifest",
-      );
+      // A closed vocabulary, not the error's message. `parseManifest` builds
+      // its JSON failure from V8's parser error, and V8 echoes the input:
+      //   Unexpected token 'S', "{"a": SENTINEL_L"... is not valid JSON
+      // A manifest is attacker-authored and this line goes to an operator's
+      // terminal and their log aggregator, so passing the message through
+      // publishes up to sixteen bytes of a stranger's file into our logs.
+      //
+      // Classifying instead of forwarding also makes the reasons aggregatable,
+      // which is what an operator actually wants from a skip: how many, of
+      // which kind, not one prose sentence per repository.
+      return skip(`unparseable manifest: ${classifyManifestFailure(error)}`);
     }
 
     // The check the whole module exists for. Up to this point the repository is
@@ -416,6 +422,23 @@ export class GitHubCodeSearchCrawler {
     if (response.status < 200 || response.status >= 300) return null;
     return response.body;
   }
+}
+
+/**
+ * Maps a manifest failure to a fixed reason.
+ *
+ * Every branch returns a constant. That is the point: a classifier that falls
+ * back to the error's text for an unrecognised case would reintroduce exactly
+ * the leak it exists to prevent, on the one path nobody tested.
+ */
+export function classifyManifestFailure(error: unknown): string {
+  if (!(error instanceof ManifestError)) return "unknown";
+  const message = error.message;
+  if (message.startsWith("Manifest exceeds")) return "too-large";
+  if (message.startsWith("Manifest is not valid JSON")) return "not-json";
+  if (message.startsWith("Manifest is not a JSON object")) return "not-an-object";
+  if (message.startsWith("Manifest declares more than")) return "too-many-dependencies";
+  return "rejected";
 }
 
 function ownerLogin(record: Record<string, unknown>): string | null {

@@ -51,6 +51,21 @@ export interface ApplyDeps {
    * Omitting it preserves exactly the behaviour that existed before enrolment.
    */
   readonly defaultProvider?: () => Promise<string | null>;
+  /**
+   * Parks an installation that belongs to no known tenant yet.
+   *
+   * Present when the deployment sells self-serve, where the tenant is resolved
+   * by the setup callback rather than by configuration. The webhook and the
+   * customer's browser race, and GitHub frequently wins — so an unenrolled
+   * installation is kept, with the repository selection the customer just
+   * made, until `/setup` claims it. Dropping it loses that selection, and
+   * nothing asks them again.
+   */
+  readonly parkInstallation?: (
+    forgeInstallationId: number,
+    account: string,
+    repositories: readonly AddedRepository[],
+  ) => Promise<void>;
 }
 
 export async function applyForgeEvent(
@@ -125,9 +140,24 @@ async function enrol(
   const providerId = deps.defaultProvider ? await deps.defaultProvider() : null;
 
   if (!providerId) {
-    // Nothing to enrol into. Reported rather than swallowed: for a
-    // single-tenant deployment this is the misconfiguration that makes the
-    // whole system silently inert, and it is worth finding in a log.
+    // Self-serve: the tenant is not knowable from this event, and will be
+    // supplied by the setup callback. Park the installation rather than
+    // dropping it — this delivery carries the repository selection the
+    // customer just made, and it is the only copy we are ever sent.
+    if (deps.parkInstallation) {
+      await deps.parkInstallation(event.installationId, event.account, event.repositories);
+      return {
+        applied: true,
+        detail:
+          `installation ${event.installationId} for ${event.account} parked ` +
+          `pending setup callback; ${event.repositories.length} repository(ies) held`,
+        auditAction: "installation.parked",
+      };
+    }
+
+    // Single-tenant, and misconfigured. Reported rather than swallowed: this
+    // is what makes the whole system silently inert, and it is worth finding
+    // in a log.
     return {
       applied: false,
       detail:
@@ -137,44 +167,63 @@ async function enrol(
     };
   }
 
-  return deps.withTenant(providerId, async (client) => {
-    const { rows } = await client.query<{ id: string }>(
-      `INSERT INTO consumer (provider_id, forge, forge_owner)
-            VALUES ($1, 'github', $2)
-       ON CONFLICT (provider_id, forge, forge_owner)
-       DO UPDATE SET forge_owner = EXCLUDED.forge_owner
-         RETURNING id`,
-      [providerId, event.account],
-    );
-    const consumerId = rows[0]?.id;
-    if (!consumerId) {
-      // RLS returning nothing here would mean the provider id we were handed
-      // is not one this connection may write as. Failing loudly beats
-      // recording an installation against no consumer.
-      throw new Error(`could not record consumer ${event.account}`);
-    }
+  return deps.withTenant(providerId, (client) =>
+    recordEnrolment(client, providerId, event.account, event.installationId, event.repositories),
+  );
+}
 
-    await client.query(
-      `INSERT INTO installation (provider_id, consumer_id, forge_installation_id)
-            VALUES ($1, $2, $3)
-       ON CONFLICT (provider_id, forge_installation_id)
-       DO UPDATE SET consumer_id = EXCLUDED.consumer_id, suspended_at = NULL`,
-      [providerId, consumerId, event.installationId],
-    );
+/**
+ * Writes the consumer, the installation and its repositories for a tenant.
+ *
+ * Exported because there are now two ways an installation becomes enrolled: a
+ * webhook for a deployment that names its tenant in configuration, and the
+ * setup callback for a self-serve one that learns the tenant from the checkout
+ * reference. Both must produce exactly the same rows — a second
+ * implementation for the second path is how the two drift until one of them
+ * quietly stops recording repositories.
+ *
+ * Idempotent throughout. A re-install arrives with the same account and a new
+ * installation id, and a setup callback can legitimately run after the webhook
+ * already enrolled the same installation.
+ */
+export async function recordEnrolment(
+  client: TenantClient,
+  providerId: string,
+  account: string,
+  forgeInstallationId: number,
+  repositories: readonly AddedRepository[],
+): Promise<ApplyResult> {
+  const { rows } = await client.query<{ id: string }>(
+    `INSERT INTO consumer (provider_id, forge, forge_owner)
+          VALUES ($1, 'github', $2)
+     ON CONFLICT (provider_id, forge, forge_owner)
+     DO UPDATE SET forge_owner = EXCLUDED.forge_owner
+       RETURNING id`,
+    [providerId, account],
+  );
+  const consumerId = rows[0]?.id;
+  if (!consumerId) {
+    // RLS returning nothing here would mean the provider id we were handed
+    // is not one this connection may write as. Failing loudly beats
+    // recording an installation against no consumer.
+    throw new Error(`could not record consumer ${account}`);
+  }
 
-    const added = await addRepositories(
-      client,
-      providerId,
-      event.installationId,
-      event.repositories,
-    );
+  await client.query(
+    `INSERT INTO installation (provider_id, consumer_id, forge_installation_id)
+          VALUES ($1, $2, $3)
+     ON CONFLICT (provider_id, forge_installation_id)
+     DO UPDATE SET consumer_id = EXCLUDED.consumer_id, suspended_at = NULL`,
+    [providerId, consumerId, forgeInstallationId],
+  );
 
-    return {
-      applied: true,
-      detail: `enrolled installation ${event.installationId} for ${event.account}; ${added.detail}`,
-      auditAction: "installation.enrolled",
-    };
-  });
+  const added = await addRepositories(client, providerId, forgeInstallationId, repositories);
+
+  return {
+    applied: true,
+    detail: `enrolled installation ${forgeInstallationId} for ${account}; ${added.detail}`,
+    auditAction: "installation.enrolled",
+  };
 }
 
 /** A known installation installing again. See the call site for why. */

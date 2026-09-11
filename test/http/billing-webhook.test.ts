@@ -20,7 +20,7 @@ class FakeStore implements BillingStore {
   readonly claimed = new Set<string>();
   created = true;
 
-  async provision(request: ProvisionRequest) {
+  async provision(request: ProvisionRequest): Promise<{ providerId: string; created: boolean }> {
     this.provisioned.push(request);
     return { providerId: "00000000-0000-0000-0000-0000000000aa", created: this.created };
   }
@@ -29,6 +29,10 @@ class FakeStore implements BillingStore {
     if (this.claimed.has(eventId)) return false;
     this.claimed.add(eventId);
     return true;
+  }
+
+  async releaseEvent(eventId: string): Promise<void> {
+    this.claimed.delete(eventId);
   }
 
   async close(): Promise<void> {}
@@ -205,9 +209,13 @@ describe("redelivery", () => {
     expect(store.provisioned).toHaveLength(1);
   });
 
-  it("claims before provisioning, so a crash mid-provision does not re-run the effect twice", async () => {
-    // The claim is taken first deliberately. The alternative — provision, then
-    // claim — turns a crash between the two into a duplicate tenant.
+  it("holds the claim once the work has actually succeeded", async () => {
+    // Claiming first is what makes two concurrent deliveries produce one
+    // tenant. It is only correct because a claim whose work fails is released
+    // again — see "a provisioning failure" below, which is where the earlier
+    // version of this test was wrong: it asserted the claim was held and
+    // called that a guarantee, when a held claim after a failure is precisely
+    // the bug.
     const event = subscriptionEvent();
     await handleBillingWebhook(delivery(event), deps());
     expect(store.claimed.has(event.id)).toBe(true);
@@ -222,5 +230,59 @@ describe("events we do not act on", () => {
     );
     expect(outcome).toEqual({ kind: "ignored", reason: "invoice.upcoming" });
     expect(store.claimed.size).toBe(0);
+  });
+});
+
+describe("a provisioning failure", () => {
+  /**
+   * The failure this system exists to make impossible: a customer is charged
+   * and never provisioned, and nothing reports a problem.
+   *
+   * The claim is taken before provisioning so that two concurrent deliveries
+   * produce one tenant. But if provisioning then fails — the database is
+   * briefly unreachable, a connection is exhausted, a deploy is mid-flight —
+   * the claim survives the failure. Stripe retries, the retry is recognised as
+   * a duplicate, and we answer 200. The customer has paid, no tenant exists,
+   * and Stripe has been told everything succeeded.
+   *
+   * The claim was never the idempotency guarantee: provision_subscription is
+   * an upsert keyed on the tenant, so provisioning twice converges. Trading a
+   * harmless duplicate for a permanent revenue loss is the wrong way round.
+   */
+  class FailingStore extends FakeStore {
+    failures = 1;
+
+    override async provision(request: ProvisionRequest) {
+      if (this.failures > 0) {
+        this.failures -= 1;
+        throw new Error("connection terminated unexpectedly");
+      }
+      return super.provision(request);
+    }
+  }
+
+  it("releases the claim so Stripe's retry can still provision the customer", async () => {
+    const failing = new FailingStore();
+    store = failing;
+    const event = subscriptionEvent();
+
+    await expect(handleBillingWebhook(delivery(event), deps())).rejects.toThrow(
+      /connection terminated/,
+    );
+
+    // The retry must be able to do the work, not be dismissed as a duplicate.
+    const retry = await handleBillingWebhook(delivery(event), deps());
+    expect(retry.kind).toBe("provisioned");
+    expect(failing.provisioned).toHaveLength(1);
+  });
+
+  it("still refuses a redelivery of an event that genuinely succeeded", async () => {
+    const event = subscriptionEvent();
+    const first = await handleBillingWebhook(delivery(event), deps());
+    const second = await handleBillingWebhook(delivery(event), deps());
+
+    expect(first.kind).toBe("provisioned");
+    expect(second.kind).toBe("duplicate");
+    expect(store.provisioned).toHaveLength(1);
   });
 });

@@ -138,10 +138,21 @@ CREATE TABLE billing_event (
   received_at  timestamptz NOT NULL DEFAULT now()
 );
 
-GRANT SELECT, INSERT ON billing_event TO driftless_billing;
+-- DELETE, and the reason matters. The claim is taken before provisioning so
+-- that two concurrent deliveries produce one tenant. If provisioning then
+-- fails, the claim must not outlive the failure: Stripe would retry, the retry
+-- would be recognised as a duplicate, and we would answer 200 to a customer who
+-- paid and was never provisioned. So a failed delivery releases its claim.
+--
+-- Releasing is safe because the claim was never the idempotency guarantee.
+-- provision_subscription is an upsert keyed on the tenant, so provisioning
+-- twice converges; the claim only saves the work, and trading a harmless
+-- duplicate for a permanent revenue loss is the wrong way round.
+GRANT SELECT, INSERT, DELETE ON billing_event TO driftless_billing;
 
 COMMENT ON TABLE billing_event IS
-  'Processed Stripe event ids. Insert-only; the primary key is the replay claim.';
+  'Stripe event ids claimed while being processed. A claim is released if '
+  'processing fails, so Stripe''s retry can still do the work. See migration 012.';
 
 -- ---------------------------------------------------------------------------
 -- Provisioning

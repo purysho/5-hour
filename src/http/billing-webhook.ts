@@ -38,6 +38,7 @@ import type { Secret } from "../config.ts";
 import { verifyStripeSignature, parseEvent, isRecord, type StripeEvent } from "../billing/stripe.ts";
 import { PLANS, planForPriceId, isPlanId, type Plan, type PlanId } from "../billing/plans.ts";
 import { slugFor, type BillingStore } from "../billing/provisioning.ts";
+import { hashToken } from "../outbound/suppression.ts";
 
 export interface BillingWebhookDeps {
   readonly secret: Secret;
@@ -86,8 +87,15 @@ export async function handleBillingWebhook(
     SUBSCRIPTION_EVENTS.has(event.type) || event.type === "checkout.session.completed";
   if (!relevant) return { kind: "ignored", reason: event.type };
 
-  // Claimed before any effect. A redelivery that arrives while the first is
+  // Claimed before any effect, so a redelivery arriving while the first is
   // still in flight loses the race here rather than provisioning twice.
+  //
+  // The claim is released if the work then fails — see the try/catch below.
+  // It has to be, because a claim that outlives a failure is worse than no
+  // claim at all: Stripe retries, the retry is dismissed as a duplicate, and a
+  // customer who paid is never provisioned while Stripe is told the delivery
+  // succeeded. That is the exact failure the config loader refuses to boot on
+  // elsewhere, and it must not be reintroduced here.
   const claimed = await deps.store.claimEvent(event.id, event.type);
   if (!claimed) return { kind: "duplicate", eventId: event.id };
 
@@ -100,7 +108,25 @@ export async function handleBillingWebhook(
     return { kind: "ignored", reason: "no-actionable-subscription" };
   }
 
-  const result = await deps.store.provision(intent);
+  let result;
+  try {
+    result = await deps.store.provision(intent);
+  } catch (error) {
+    // Release, then rethrow. Rethrowing is what makes the server answer 5xx,
+    // which is what makes Stripe retry at all; swallowing the error here would
+    // leave the customer unprovisioned just as silently.
+    //
+    // A release that itself fails must not mask the original error — that one
+    // is the reason provisioning failed, and it is the one worth reading.
+    await deps.store.releaseEvent(event.id).catch((releaseError) => {
+      deps.log("failed to release billing event claim", {
+        eventId: event.id,
+        error: String(releaseError),
+      });
+    });
+    throw error;
+  }
+
   deps.log("tenant provisioned", {
     eventType: event.type,
     plan: intent.plan.id,
@@ -125,6 +151,7 @@ interface Intent {
   readonly plan: Plan;
   readonly currentPeriodEnd: Date | null;
   readonly cancelAtPeriodEnd: boolean;
+  readonly enrolmentRefHash: string | null;
 }
 
 function fromSubscriptionEvent(
@@ -152,6 +179,9 @@ function fromSubscriptionEvent(
     plan,
     currentPeriodEnd: unixField(object, "current_period_end"),
     cancelAtPeriodEnd: object["cancel_at_period_end"] === true,
+    // Subscription events carry no checkout reference. Only the session event
+    // does, and whichever arrives first wins in the function.
+    enrolmentRefHash: null,
   };
 }
 
@@ -172,6 +202,7 @@ function fromCheckoutSession(
   if (plan === null) return null;
 
   const email = customerEmail(object);
+  const reference = stringField(object, "client_reference_id");
 
   return {
     slug: slugFor(email, customerId),
@@ -184,6 +215,11 @@ function fromCheckoutSession(
     plan,
     currentPeriodEnd: null,
     cancelAtPeriodEnd: false,
+    // The reference that binds a GitHub installation to the tenant this
+    // payment created. Hashed here and never stored in the clear: it travels
+    // in a URL, and anyone holding one could bind their own installation to
+    // this tenant.
+    enrolmentRefHash: reference === null ? null : hashToken(reference),
   };
 }
 

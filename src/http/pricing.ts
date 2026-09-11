@@ -69,14 +69,22 @@ export async function startCheckout(
     return { kind: "rejected", reason: "plan-not-configured" };
   }
 
+  // The reference that will bind a GitHub installation to the tenant this
+  // payment creates. It goes to Stripe as `client_reference_id`, comes back on
+  // `checkout.session.completed`, and travels through the App install as
+  // `state`. Those are the only two places the same value appears, and
+  // matching them is the whole of self-serve enrolment.
+  //
+  // Random and opaque: it carries nothing about the customer, so the copy that
+  // ends up in their browser history discloses nothing on its own.
+  const enrolmentRef = randomUUID();
+
   const session = await deps.stripe.createCheckoutSession({
     priceId,
     planId: planField,
-    successUrl: `${deps.publicOrigin}/welcome?session={CHECKOUT_SESSION_ID}`,
+    successUrl: `${deps.publicOrigin}/welcome?ref=${enrolmentRef}`,
     cancelUrl: `${deps.publicOrigin}/pricing`,
-    // Correlates our logs with a Stripe session without carrying anything
-    // about the customer.
-    clientReferenceId: randomUUID(),
+    clientReferenceId: enrolmentRef,
   });
 
   return { kind: "redirect", url: session.url };
@@ -90,16 +98,47 @@ export async function startCheckout(
  * kind of small lie that produces a support ticket. It tells the customer the
  * one thing they must now do, which is install the GitHub App.
  */
-export function welcomeResponse(installUrl: string, portalUrl: string): {
+/**
+ * The page shown after a successful checkout.
+ *
+ * `enrolmentRef` is appended to the install link as `state`. GitHub hands it
+ * back to our setup URL after the customer installs, and that is the moment
+ * the installation can be attached to the tenant that paid. Without it the
+ * customer installs the App and connects to nothing.
+ *
+ * A missing reference still renders: the customer has paid and must not be
+ * shown an error. The link then omits `state`, the setup callback refuses it,
+ * and they are told to use the link in their receipt — which carries one.
+ */
+export function welcomeResponse(
+  installUrl: string,
+  portalUrl: string,
+  enrolmentRef: string | null,
+): {
   status: number;
   headers: Readonly<Record<string, string>>;
   body: string;
 } {
   return {
     status: 200,
+    // Never cached: the URL and the page both carry the reference, which is a
+    // bearer credential for binding an installation to this tenant.
     headers: { ...SECURITY_HEADERS, "cache-control": "no-store" },
-    body: renderWelcome(installUrl, portalUrl),
+    body: renderWelcome(withState(installUrl, enrolmentRef), portalUrl),
   };
+}
+
+export function withState(installUrl: string, enrolmentRef: string | null): string {
+  if (enrolmentRef === null || enrolmentRef === "") return installUrl;
+  try {
+    const url = new URL(installUrl);
+    url.searchParams.set("state", enrolmentRef);
+    return url.toString();
+  } catch {
+    // A malformed install URL is a configuration error, not something to
+    // paper over by string-concatenating a credential onto it.
+    return installUrl;
+  }
 }
 
 function escapeHtml(value: string): string {

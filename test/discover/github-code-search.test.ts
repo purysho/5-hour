@@ -237,21 +237,83 @@ describe("a malformed manifest", () => {
 
     expect(candidates).toHaveLength(0);
     const skip = logged.find((entry) => entry.event === "discovery.repository_skipped");
-    expect(skip?.detail["reason"]).toMatch(/unparseable manifest/);
+    expect(skip?.detail["reason"]).toBe("unparseable manifest: not-json");
   });
 
-  it("does not log the manifest contents", async () => {
-    // A manifest is attacker-authored and this reaches an operator's terminal.
-    http
-      .on("/search/code", { status: 200, body: searchBody([hit("acme", "broken")]) })
-      .on("/repos/acme/broken/contents/package.json", {
-        status: 200,
-        body: '{ "evil": "SENTINEL_MANIFEST_BODY" ',
-      })
-      .on("/repos/acme/broken", { status: 200, body: repoBody("acme", "broken") });
+  /**
+   * The manifest must not reach the log, in any of the shapes V8 produces.
+   *
+   * The earlier version of this test used a single malformed body and asserted
+   * a sentinel was absent. It passed — and proved nothing. V8 emits two
+   * different parse errors: one that reports only a position, and one that
+   * quotes about sixteen bytes of the input back:
+   *
+   *   Unexpected token 'S', "{"a": SENTINEL_L"... is not valid JSON
+   *
+   * The old fixture happened to land in the first form, so the test could not
+   * have failed for the case it claimed to cover. These are the payloads that
+   * actually produce the quoting form.
+   */
+  const LEAKING_PAYLOADS = [
+    '{"a": SENTINEL_MANIFEST_BODY}',
+    "{SENTINEL_MANIFEST_BODY",
+    '{"dependencies": SENTINEL_MANIFEST_BODY }',
+  ];
 
-    await crawler().findCandidates("acme-sdk", CREDENTIAL);
-    expect(JSON.stringify(logged)).not.toContain("SENTINEL_MANIFEST_BODY");
+  for (const [index, payload] of LEAKING_PAYLOADS.entries()) {
+    it(`does not log manifest contents for payload ${index + 1}`, async () => {
+      http
+        .on("/search/code", { status: 200, body: searchBody([hit("acme", "broken")]) })
+        .on("/repos/acme/broken/contents/package.json", { status: 200, body: payload })
+        .on("/repos/acme/broken", { status: 200, body: repoBody("acme", "broken") });
+
+      await crawler().findCandidates("acme-sdk", CREDENTIAL);
+
+      expect(JSON.stringify(logged)).not.toContain("SENTINEL");
+      const skip = logged.find((entry) => entry.event === "discovery.repository_skipped");
+      expect(skip?.detail["reason"]).toBe("unparseable manifest: not-json");
+    });
+  }
+
+  it("proves the payloads would leak if the message were forwarded", () => {
+    // Guards the guard. If V8 ever stops quoting input, these fixtures become
+    // vacuous and this test says so rather than letting them rot into
+    // coverage that asserts nothing.
+    const quoting = LEAKING_PAYLOADS.filter((payload) => {
+      try {
+        JSON.parse(payload);
+        return false;
+      } catch (error) {
+        return String((error as Error).message).includes("SENTINEL");
+      }
+    });
+    expect(quoting.length).toBeGreaterThan(0);
+  });
+
+  it("classifies each manifest failure to a constant", async () => {
+    const { classifyManifestFailure } = await import(
+      "../../src/discover/github-code-search.ts"
+    );
+    const { ManifestError } = await import("../../src/discover/manifest.ts");
+
+    expect(classifyManifestFailure(new ManifestError("Manifest exceeds 100 bytes"))).toBe(
+      "too-large",
+    );
+    expect(
+      classifyManifestFailure(new ManifestError('Manifest is not valid JSON: "SENTINEL"...')),
+    ).toBe("not-json");
+    expect(classifyManifestFailure(new ManifestError("Manifest is not a JSON object"))).toBe(
+      "not-an-object",
+    );
+    expect(
+      classifyManifestFailure(new ManifestError("Manifest declares more than 5 dependencies")),
+    ).toBe("too-many-dependencies");
+    // The unrecognised case returns a constant too, rather than falling back
+    // to the text — that fallback is the leak, on the path nobody tests.
+    expect(classifyManifestFailure(new ManifestError("SENTINEL something new"))).toBe(
+      "rejected",
+    );
+    expect(classifyManifestFailure(new Error("SENTINEL"))).toBe("unknown");
   });
 });
 

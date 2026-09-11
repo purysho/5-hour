@@ -23,6 +23,7 @@ import { landingResponse } from "../http/landing.ts";
 import { handleWebhook, type WebhookDeps } from "../http/webhook.ts";
 import { applyForgeEvent, type ApplyDeps } from "../http/webhook-apply.ts";
 import { pricingResponse, startCheckout, welcomeResponse, type CheckoutDeps } from "../http/pricing.ts";
+import { handleSetup, setupResponse, type SetupDeps } from "../http/setup.ts";
 import { handleBillingWebhook, type BillingWebhookDeps } from "../http/billing-webhook.ts";
 
 export interface ServerDeps {
@@ -35,6 +36,8 @@ export interface ServerDeps {
     readonly webhook: BillingWebhookDeps;
     readonly appInstallUrl: string;
     readonly portalUrl: string;
+    /** Binds an installation to the tenant that paid. See src/http/setup.ts. */
+    readonly setup: SetupDeps;
   };
   /** Reports readiness. False makes /health fail so a load balancer drains us. */
   readonly ready: () => boolean;
@@ -122,7 +125,38 @@ async function handleRequest(
       res.end("Not found\n");
       return;
     }
-    const page = welcomeResponse(billing.appInstallUrl, billing.portalUrl);
+    // The reference minted at checkout, echoed back by Stripe's success URL.
+    const page = welcomeResponse(
+      billing.appInstallUrl,
+      billing.portalUrl,
+      url.searchParams.get("ref"),
+    );
+    res.writeHead(page.status, page.headers);
+    res.end(method === "HEAD" ? undefined : page.body);
+    return;
+  }
+
+  // The GitHub App's setup URL. GitHub sends a customer here after they
+  // install, with the installation id and the `state` we put on the link —
+  // the only request in which both the installation and the paying tenant are
+  // knowable. See src/http/setup.ts.
+  if (path === "/setup" && (method === "GET" || method === "HEAD")) {
+    if (billing === undefined) {
+      res.writeHead(404, { "content-type": "text/plain" });
+      res.end("Not found\n");
+      return;
+    }
+    const outcome = await handleSetup(
+      {
+        installationId: url.searchParams.get("installation_id"),
+        state: url.searchParams.get("state"),
+      },
+      billing.setup,
+    );
+    if (outcome.kind === "rejected") {
+      deps.log("setup callback rejected", { reason: outcome.reason });
+    }
+    const page = setupResponse(outcome);
     res.writeHead(page.status, page.headers);
     res.end(method === "HEAD" ? undefined : page.body);
     return;
