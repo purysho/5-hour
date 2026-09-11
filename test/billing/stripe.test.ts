@@ -223,3 +223,47 @@ describe("the Stripe API client", () => {
     ).rejects.toThrow(/no URL/);
   });
 });
+
+describe("checkout when Stripe is unavailable", () => {
+  it("reports unavailable rather than throwing into the request handler", async () => {
+    // This is the click that makes money. Letting it reach the server's
+    // generic handler answers an unstyled "Internal error" with a 500, and a
+    // customer who sees a crash on the buy button does not come back.
+    const { startCheckout } = await import("../../src/http/pricing.ts");
+    const logged: { message: string; fields?: Record<string, unknown> }[] = [];
+
+    const outcome = await startCheckout("team", {
+      stripe: {
+        createCheckoutSession: async () => {
+          throw new StripeApiError(503, "Stripe request to /checkout/sessions failed");
+        },
+      },
+      priceIds: { starter: "price_a", team: "price_b", scale: "price_c" },
+      publicOrigin: "https://driftless.dev",
+      log: (message, fields) => logged.push({ message, ...(fields ? { fields } : {}) }),
+    });
+
+    expect(outcome.kind).toBe("unavailable");
+    // Logged loudly: a misconfigured key produces exactly this, and is
+    // otherwise invisible until someone notices nobody has signed up.
+    expect(logged.map((entry) => entry.message)).toContain("checkout could not be created");
+  });
+
+  it("does not leak the key through the failure log", async () => {
+    const { startCheckout } = await import("../../src/http/pricing.ts");
+    const logged: unknown[] = [];
+
+    await startCheckout("team", {
+      stripe: {
+        createCheckoutSession: async () => {
+          throw new StripeApiError(401, "Stripe request to /checkout/sessions failed");
+        },
+      },
+      priceIds: { starter: "price_a", team: "price_b", scale: "price_c" },
+      publicOrigin: "https://driftless.dev",
+      log: (message, fields) => logged.push({ message, fields }),
+    });
+
+    expect(JSON.stringify(logged)).not.toContain("sk_");
+  });
+});

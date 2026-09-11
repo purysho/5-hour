@@ -20,7 +20,7 @@
  */
 
 import { PLANS, isPlanId, formatPrice, type Plan, type PlanId } from "../billing/plans.ts";
-import type { StripeClient } from "../billing/stripe.ts";
+import { StripeApiError, type StripeClient } from "../billing/stripe.ts";
 import { randomUUID } from "node:crypto";
 
 const SECURITY_HEADERS: Readonly<Record<string, string>> = Object.freeze({
@@ -51,7 +51,17 @@ export interface CheckoutDeps {
 
 export type CheckoutOutcome =
   | { readonly kind: "redirect"; readonly url: string }
-  | { readonly kind: "rejected"; readonly reason: string };
+  | { readonly kind: "rejected"; readonly reason: string }
+  /**
+   * Stripe would not give us a session.
+   *
+   * Separate from "rejected" because the customer did nothing wrong and the
+   * right response is different: a rejection means the request was malformed
+   * and belongs back at the pricing page, while this means our payment
+   * provider is unavailable and the customer should be told to try again
+   * rather than shown a generic failure.
+   */
+  | { readonly kind: "unavailable"; readonly detail: string };
 
 export async function startCheckout(
   planField: string | undefined,
@@ -79,13 +89,34 @@ export async function startCheckout(
   // ends up in their browser history discloses nothing on its own.
   const enrolmentRef = randomUUID();
 
-  const session = await deps.stripe.createCheckoutSession({
-    priceId,
-    planId: planField,
-    successUrl: `${deps.publicOrigin}/welcome?ref=${enrolmentRef}`,
-    cancelUrl: `${deps.publicOrigin}/pricing`,
-    clientReferenceId: enrolmentRef,
-  });
+  let session;
+  try {
+    session = await deps.stripe.createCheckoutSession({
+      priceId,
+      planId: planField,
+      successUrl: `${deps.publicOrigin}/welcome?ref=${enrolmentRef}`,
+      cancelUrl: `${deps.publicOrigin}/pricing`,
+      clientReferenceId: enrolmentRef,
+    });
+  } catch (error) {
+    // Caught here rather than left to the server's generic handler, which
+    // answers an unstyled "Internal error" with a 500. This is the click that
+    // makes us money: a customer who sees a crash on it does not come back,
+    // and Stripe outages are a thing that happens. Logged loudly, because a
+    // misconfigured key produces exactly this and is otherwise invisible until
+    // someone notices nobody has signed up.
+    deps.log("checkout could not be created", {
+      plan: planField,
+      status: error instanceof StripeApiError ? error.status : 0,
+      // The message, never the response body — an auth failure can echo the
+      // key that produced it, which is why StripeApiError does not carry one.
+      error: error instanceof Error ? error.message : "unknown",
+    });
+    return {
+      kind: "unavailable",
+      detail: error instanceof Error ? error.message : "unknown",
+    };
+  }
 
   return { kind: "redirect", url: session.url };
 }
@@ -139,6 +170,44 @@ export function withState(installUrl: string, enrolmentRef: string | null): stri
     // paper over by string-concatenating a credential onto it.
     return installUrl;
   }
+}
+
+/**
+ * Shown when Stripe would not give us a session.
+ *
+ * A 503 rather than a 500: this is a dependency being unavailable, not a bug
+ * in the request, and a monitor that distinguishes the two is worth more than
+ * one that does not. It says nothing about why, because the customer cannot
+ * act on the reason and the reason is ours to fix.
+ */
+export function checkoutUnavailableResponse(): {
+  status: number;
+  headers: Readonly<Record<string, string>>;
+  body: string;
+} {
+  return {
+    status: 503,
+    headers: { ...SECURITY_HEADERS, "cache-control": "no-store", "retry-after": "30" },
+    body: `<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Checkout is unavailable — Driftless</title>
+<style>${STYLE}</style>
+</head>
+<body>
+<main>
+  <h1>We could not start checkout</h1>
+  <p class="lede">
+    Our payment provider did not respond. Nothing has been charged and nothing
+    has been created. Please try again in a moment.
+  </p>
+  <p><a href="/pricing"><button type="button">Back to pricing</button></a></p>
+</main>
+</body>
+</html>`,
+  };
 }
 
 function escapeHtml(value: string): string {

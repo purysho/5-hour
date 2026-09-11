@@ -133,19 +133,53 @@ instead of rotting into coverage that asserts nothing.
 This is the finding I would most expect a self-review to miss, and the reason
 the audit was run by execution rather than by reading.
 
+### F6 — The buy button crashed when Stripe was unavailable · MEDIUM · fixed
+
+Found while proving F-open-1: every `/checkout` attempt against an unreachable
+Stripe answered **500 with an unstyled "Internal error"**. The exception
+escaped to the server's generic handler.
+
+This is the click that makes money. A customer who sees a crash on it does not
+come back, Stripe outages happen, and a misconfigured key produces exactly this
+failure — invisible until somebody notices nobody has signed up.
+
+**Fixed**: the Stripe call is caught at the checkout route. It answers 503 with
+a page saying nothing was charged and nothing created, sets `retry-after`, and
+logs `checkout could not be created` with the upstream status. 503 rather than
+500 deliberately: a dependency being unavailable and a bug in our code deserve
+different alerts. Verified live — 503, correct page, and the secret key absent
+from the log.
+
 ---
 
 ## Open, and not fixed
 
 Stated because leaving them undocumented would be the same failure as F1.
 
-### O1 — `/checkout` is unauthenticated and calls a paid third-party API
+### ~~O1 — `/checkout` is unauthenticated and calls a paid third-party API~~ · fixed
 
-Anyone can POST a valid plan and make us create a Stripe Checkout Session.
-There is no rate limit. The cost is bounded by Stripe's own API limits, not by
-anything we control, and the endpoint is the one place an anonymous caller can
-make us spend money. The plan is validated before any network call, which
-bounds the *garbage* case but not the valid-plan case.
+Anyone could POST a valid plan and make us create a Stripe Checkout Session,
+with nothing bounding it. The endpoint is the one place an anonymous caller
+decides our spending.
+
+**Fixed**: two buckets. Five per client per minute, which is fair and
+trivially bypassable — addresses are cheap and the forwarded header is
+caller-controlled. And sixty per minute globally, which cannot be bypassed by
+spreading across addresses and is the bound that actually caps the bill. The
+global ceiling denies checkout to real customers during an attack; that is a
+deliberate trade, and a few minutes of refused checkouts is recoverable where
+an unbounded bill is not.
+
+The client map is itself bounded, because a limiter keyed on caller-supplied
+values is otherwise a memory-exhaustion primitive — a worse bug than the one it
+prevents.
+
+Verified live: five through, then 429 with `retry-after: 60`, and a different
+client unaffected.
+
+**Residual**: in-process, so it bounds one instance rather than a fleet. Two
+containers permit twice this. Honest for a deployment of one or two; the fix
+beyond that is a shared counter, not a smaller number.
 
 ### O2 — Stripe signature verification has never met Stripe
 
@@ -199,9 +233,25 @@ paying for at all.
 
 ## What I would do next, in order
 
-1. O6 — the sandbox. Unverified migrations are the reason a maintainer closes
-   the pull request, and everything else here is upstream of a product nobody
-   merges.
-2. O1 — bound the cost of the one endpoint that spends money anonymously.
-3. O2 — one real Stripe test-mode transaction, which retires the largest
-   remaining untested assumption in the revenue path.
+1. **O6 — the sandbox.** Unverified migrations are the reason a maintainer
+   closes the pull request, and everything else here is upstream of a product
+   nobody merges. This is the largest single thing standing between the code
+   and revenue, and it is not close.
+2. **O2 — one real Stripe test-mode transaction.** Retires the largest untested
+   assumption in the revenue path. Everything about signature verification is
+   currently confirmed against my own implementation of my own reading of the
+   scheme, which is agreement rather than evidence.
+3. **O3 — lengthen the slug suffix.** Cheap, and removes the only remaining
+   path to a cross-tenant merge.
+
+## What this audit is worth
+
+Four defects that would each have cost money, three of them invisible to a
+green 1172-test suite, and two of them found in the first ten minutes of
+actually starting the server. The suite was not bad — it was testing the
+things I had thought of, which is the definition of what a suite cannot do.
+
+The honest conclusion is not that the code is now safe. It is that **running
+the thing found in minutes what reading it had missed for hours**, and that
+the remaining open findings are the ones I have not yet found a way to
+execute.

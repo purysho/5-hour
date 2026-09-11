@@ -6,7 +6,11 @@
       "Bash(git remote *)",
       "Bash(git ls-remote *)",
       "Bash(python3 -)",
-      "Bash(git commit -q -m 'Correct the status the docs report *)"
+      "Bash(git commit -q -m 'Correct the status the docs report *)",
+      "Bash(timeout 900 pnpm test)",
+      "Bash(pnpm typecheck *)",
+      "Bash(pnpm lint *)",
+      "Bash(git commit *)"
     ]
   }
 }

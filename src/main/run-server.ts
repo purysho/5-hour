@@ -11,6 +11,7 @@ import { Database } from "../db/client.ts";
 import { createHttpServer } from "./server.ts";
 import { hashToken } from "../outbound/suppression.ts";
 import { recordEnrolment } from "../http/webhook-apply.ts";
+import { RateLimiter } from "../http/rate-limit.ts";
 import { createStripeClient } from "../billing/stripe.ts";
 import { createBillingStore } from "../billing/provisioning.ts";
 
@@ -56,6 +57,17 @@ const server = createHttpServer({
         billing: {
           appInstallUrl: billingConfig.appInstallUrl,
           portalUrl: billingConfig.portalUrl,
+
+          // Sized against real demand, not against the attack. A business at
+          // this revenue does not see sixty checkouts a minute, so reaching
+          // the ceiling means something is wrong and refusing is correct.
+          // Five per client covers a customer who mis-clicks, changes plan,
+          // and comes back.
+          checkoutLimiter: new RateLimiter({
+            perClient: 5,
+            global: 60,
+            windowMs: 60_000,
+          }),
 
           // Binding a payment to an installation. The only request in which
           // both facts exist — see src/http/setup.ts.

@@ -22,8 +22,15 @@ import { handleOptOut, type OptOutDeps } from "../http/opt-out.ts";
 import { landingResponse } from "../http/landing.ts";
 import { handleWebhook, type WebhookDeps } from "../http/webhook.ts";
 import { applyForgeEvent, type ApplyDeps } from "../http/webhook-apply.ts";
-import { pricingResponse, startCheckout, welcomeResponse, type CheckoutDeps } from "../http/pricing.ts";
+import {
+  pricingResponse,
+  startCheckout,
+  welcomeResponse,
+  checkoutUnavailableResponse,
+  type CheckoutDeps,
+} from "../http/pricing.ts";
 import { handleSetup, setupResponse, type SetupDeps } from "../http/setup.ts";
+import { clientKeyFrom, type RateLimiter } from "../http/rate-limit.ts";
 import { handleBillingWebhook, type BillingWebhookDeps } from "../http/billing-webhook.ts";
 
 export interface ServerDeps {
@@ -38,6 +45,13 @@ export interface ServerDeps {
     readonly portalUrl: string;
     /** Binds an installation to the tenant that paid. See src/http/setup.ts. */
     readonly setup: SetupDeps;
+    /**
+     * Bounds what an anonymous caller can make us spend at Stripe.
+     *
+     * /checkout is unauthenticated by necessity and calls a paid third-party
+     * API, which makes it the one route where a stranger decides our bill.
+     */
+    readonly checkoutLimiter: RateLimiter;
   };
   /** Reports readiness. False makes /health fail so a load balancer drains us. */
   readonly ready: () => boolean;
@@ -173,8 +187,30 @@ async function handleRequest(
       res.end();
       return;
     }
+    // Before the body is read and before Stripe is called. Reading a megabyte
+    // from a caller we are about to refuse is work they chose for us.
+    const limit = billing.checkoutLimiter.check(
+      clientKeyFrom(normaliseHeaders(req), req.socket.remoteAddress),
+    );
+    if (!limit.allowed) {
+      deps.log("checkout rate limited", { scope: limit.scope });
+      res.writeHead(429, {
+        "retry-after": String(limit.retryAfterSeconds),
+        "content-type": "text/plain",
+      });
+      res.end("Too many checkout attempts. Please try again shortly.\n");
+      return;
+    }
+
     const form = parseForm(await readBody(req));
     const outcome = await startCheckout(form["plan"], billing.checkout);
+    if (outcome.kind === "unavailable") {
+      const page = checkoutUnavailableResponse();
+      res.writeHead(page.status, page.headers);
+      res.end(page.body);
+      return;
+    }
+
     if (outcome.kind === "rejected") {
       deps.log("checkout rejected", { reason: outcome.reason });
       // Back to the page they came from rather than an error document. The

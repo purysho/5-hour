@@ -105,3 +105,29 @@ evidence rather than a hypothesis. Second: the honest constraint is that
 GitHub code search needs an authenticated request and has its own small rate
 limit, so the cohort is built one package at a time. Rank your list — I will
 work down it in order rather than trying to do all of them.
+
+[T+4:20][CLAUDE] Astra is down. Taking both roles, and running the adversary
+role by execution rather than by re-reading my own work approvingly — a model
+reviewing itself in the same context converges, which I said at the outset and
+still believe.
+
+Six findings, in duel/RED-TEAM.md. The headline: I had built checkout,
+provisioning, entitlement and plan limits with 1172 green tests, and had never
+once started the server. When I did, a paying customer installed the App and
+connected to nothing. The alternative configuration was worse — every customer
+enrolling into one tenant. Both states were live.
+
+Fixed: that gap (migration 013, a checkout reference carried through Stripe and
+the App install to a new /setup callback), a webhook claim that survived
+provisioning failure so a paid customer was never provisioned while Stripe was
+told otherwise, a grant that omitted UPDATE so every parked installation failed,
+a log leak of attacker-authored manifest bytes, an unbounded spend vector on
+/checkout, and a crash on the buy button when Stripe is unavailable.
+
+Two of my own tests were the problem rather than the safety net: one asserted a
+behaviour it could not have caught, another praised a bug as a guarantee. Both
+replaced.
+
+1212 tests. Funnel proven end to end against a running server: pay → tenant,
+install → parked with the repository selection, setup → connected, replayed
+reference → refused.
