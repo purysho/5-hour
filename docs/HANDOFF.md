@@ -32,7 +32,7 @@ orders every control.
 
 ## Where things stand
 
-**Done and tested** (573 tests, live Postgres required):
+**Done and tested** (1127 tests, live Postgres required):
 
 | Area | Where |
 |---|---|
@@ -71,8 +71,24 @@ orders every control.
 | Runnable entry points | `src/main/run-server.ts`, `src/main/run-worker.ts` |
 | Public homepage | `src/http/landing.ts` (served at `/`) |
 | File-backed signer (interim) | `src/github/signer.ts`, ADR-0012 |
+| Subscriptions + tenant provisioning | `migrations/012_billing.sql`, `test/db/billing.test.ts` |
+| Entitlement at the outbound write | `src/billing/entitlement.ts`, `test/db/entitlement-enforcement.test.ts` |
+| Stripe boundary (no SDK) | `src/billing/stripe.ts`, `test/billing/stripe.test.ts` |
+| Checkout, pricing, welcome | `src/http/pricing.ts` |
+| Stripe webhook → tenant | `src/http/billing-webhook.ts`, `test/http/billing-webhook.test.ts` |
+| Plan repository limits | `src/billing/limits.ts`, `test/db/repository-limit.test.ts` |
 
-**Not started:** the dashboard.
+**Not started:** the customer dashboard.
+
+**Billing, in one paragraph.** A customer pays at `/pricing`, Stripe posts to
+`/webhooks/stripe`, and `provision_subscription` creates the tenant and its
+subscription in one idempotent call. The application role still cannot create a
+tenant — provisioning runs as `driftless_billing`, a third login role that can
+create tenants and read nothing, because Postgres ORs together the policies of
+every role you hold (non-negotiable 10 applies to all three roles now, and
+`pnpm preflight` checks it). Entitlement is read on every outbound write, fails
+closed, and consumes no idempotency claim, so a lapsed customer who pays finds
+the outstanding work still doable.
 
 The pipeline is now connected end to end: an installation webhook records
 repositories, the scheduler sweeps watched packages, a human sets
@@ -199,7 +215,16 @@ make a change pass, stop.
    control plane, and the safety comes from the absence of the capability
    rather than from checks around it. Adding `fs` to either file is a design
    change, not a refactor.
-18. **A tarball URL is checked against an allowlist before it is fetched.**
+18. **Entitlement is checked before the idempotency claim, never after.** A
+   refused tenant must consume no claim. Consuming one means that when they
+   pay, the work is already marked done and is never performed — a silent
+   failure indistinguishable from the product not working. The same reasoning
+   as suppression, and the same position in `authoriseOutboundWrite`.
+19. **The application role cannot write to `subscription`.** It holds SELECT
+   and nothing else. If it could write, entitlement would be advisory: any
+   path that reaches a tenant connection could grant itself a plan. Tested by
+   attempting both an INSERT and an UPDATE as the app login role.
+20. **A tarball URL is checked against an allowlist before it is fetched.**
    `dist.tarball` is chosen by the registry, so an unchecked fetch is
    server-side request forgery with our network position behind it.
 

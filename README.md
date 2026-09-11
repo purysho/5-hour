@@ -118,8 +118,11 @@ Four properties this design exists to guarantee:
 
 ## Status
 
-The spine is built and covered by tests. What remains is largely the parts that
-must talk to the outside world.
+The spine is built and covered by tests, and it can now be sold: a customer can
+pay, be provisioned without an operator touching anything, and lose access when
+they stop paying. 1127 tests, against a live Postgres.
+
+What remains is largely the parts that must talk to the outside world.
 
 **Built and tested**
 
@@ -160,14 +163,23 @@ must talk to the outside world.
   ambiguity rather than guessing a resolved version
 - The detection scheduler: the claim is a database statement, so two workers
   produce one sweep per package per interval rather than two
+- The commercial layer: Stripe checkout, a webhook that provisions the tenant
+  without a human, entitlement enforced at the outbound write, and the
+  repository limit the plans are actually sold on. Creating a tenant stays
+  impossible for the application role — provisioning goes through a
+  `SECURITY DEFINER` function granted to a third role that can create tenants
+  and read nothing (migration 012)
 
 **Not built yet**
 
 The runner isolation itself (gVisor or Firecracker) — and therefore test
-verification, which is reported honestly as `not-run` until it exists — a real
-KMS signer, the forge client that opens the pull request, the
+verification, which is reported honestly as `not-run` until it exists — the
 dependent-repository crawler that feeds impact classification, and the
-dashboard.
+customer dashboard.
+
+Two entries previously listed here are done and the list was stale: the forge
+client that opens the pull request (`src/forge/github-forge.ts`) and the KMS
+signer (`src/github/kms-signer.ts`).
 
 ## Getting started
 
@@ -197,6 +209,7 @@ src/
   agent/untrusted.ts   instruction/data boundary (ADR-0003)
   agent/edit-plan.ts   the model's proposal, validated and applied (ADR-0013)
   audit/verify.ts      chain verifier customers can run themselves (ADR-0007)
+  billing/             plans, entitlement, Stripe, provisioning (migration 012)
   db/client.ts         tenant and platform database access (ADR-0005, ADR-0010)
   github/              app auth and scoped credentials (ADR-0002)
   outbound/guard.ts    kill switch, rate ceilings, idempotency claim (ADR-0004)
