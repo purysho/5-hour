@@ -77,6 +77,8 @@ orders every control.
 | Checkout, pricing, welcome | `src/http/pricing.ts` |
 | Stripe webhook → tenant | `src/http/billing-webhook.ts`, `test/http/billing-webhook.test.ts` |
 | Plan repository limits | `src/billing/limits.ts`, `test/db/repository-limit.test.ts` |
+| Downstream discovery crawler | `src/discover/github-code-search.ts`, `test/discover/` |
+| Cold-start target selection | `scripts/find-candidates.ts` (`pnpm discover`) |
 
 **Not started:** the customer dashboard.
 
@@ -256,11 +258,36 @@ make a change pass, stop.
    no-op, which is the correct default but is worth knowing when detection
    appears to be doing nothing.
 
-4. **Downstream discovery.** Impact classification and prioritisation are done
-   in `src/discover/affected.ts`, and manifest and lockfile reading is done in
-   `src/discover/manifest.ts`. What remains is the crawler that produces
-   `RepositoryCandidate`s from public dependency data — GitHub's dependency
-   graph, registry dependents, or code search.
+4. ~~**Downstream discovery.**~~ Done for public GitHub.
+   `src/discover/github-code-search.ts` produces `RepositoryCandidate`s, and
+   `pnpm discover <package>` is the operator command for choosing a cold-start
+   cohort.
+
+   The governing rule is worth keeping straight, because it is the difference
+   between this being useful and being the thing that gets the App blocked:
+   **code search is a lead generator and never evidence**. A repository whose
+   `package.json` mentions a package in a script, a description, or an
+   `overrides` block is a search hit and is not a consumer. A hit only earns a
+   repository the right to be checked; the real root manifest is then fetched
+   and parsed through `parseManifest`, and a candidate exists only if the
+   parsed dependencies genuinely contain the package.
+
+   Precision over recall, deliberately. Missing a consumer costs one pull
+   request nobody sees. Inventing one costs the channel.
+
+   Two bounds are deliberate and not oversights. Root manifests only — a hit
+   at `packages/thing/package.json` is ignored, because a monorepo's dependency
+   story spans manifests we would have to merge, and a partial merge produces a
+   confident wrong answer about which range applies. And no pagination past the
+   first hundred hits: the requirement is enough precise candidates for a first
+   outreach cohort, not an index of the ecosystem.
+
+   `lockedVersion` is left unset rather than guessed. `assessRepository` treats
+   it as the strongest evidence available, so a fabricated one would override a
+   correct reading of the declared range.
+
+   What remains here: registry dependents and GitHub's dependency graph as
+   additional sources, and nested workspace manifests.
 
    The lockfile reader is a targeted extractor rather than a parser, and the
    reason it is allowed to be is worth keeping straight: it contributes only

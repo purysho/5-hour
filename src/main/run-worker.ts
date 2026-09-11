@@ -45,7 +45,8 @@ import { ApprovalTrigger, PostgresApprovalStore } from "../schedule/approval-tri
 import { GitHubApp } from "../github/app.ts";
 import { FileSigner, KmsSigner, type KmsClient } from "../github/signer.ts";
 import { AwsKmsClient } from "../github/kms-signer.ts";
-import { GitHubForgeClient, type ForgeHttpClient } from "../forge/github-forge.ts";
+import { GitHubForgeClient } from "../forge/github-forge.ts";
+import { createFetchHttpClient } from "../forge/fetch-http.ts";
 import { GitHubContentClient } from "../forge/github-contents.ts";
 import {
   AnthropicModelClient,
@@ -81,16 +82,7 @@ const queue = new Queue(db, { workerId });
 // modules that use it. Credential-handling code does not inherit an SDK's
 // error messages, which are a common route for a token to reach a log.
 
-const forgeHttp: ForgeHttpClient = {
-  async request(method, url, body, headers) {
-    const response = await fetch(url, {
-      method,
-      headers: { ...headers, ...(body !== undefined && { "content-type": "application/json" }) },
-      ...(body !== undefined && { body: JSON.stringify(body) }),
-    });
-    return { status: response.status, body: await response.text() };
-  },
-};
+const forgeHttp = createFetchHttpClient();
 
 // ── detect-changes ──────────────────────────────────────────────────────────
 //

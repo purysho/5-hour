@@ -21,6 +21,7 @@
     "db:watch": "node --experimental-strip-types scripts/watch-package.ts",
     "db:approve": "node --experimental-strip-types scripts/approve-change.ts",
     "db:status": "node --experimental-strip-types scripts/status.ts",
+    "discover": "node --experimental-strip-types scripts/find-candidates.ts",
     "db:replan": "node --experimental-strip-types scripts/replan.ts",
     "start:worker": "node --experimental-strip-types src/main/run-worker.ts",
     "start:server": "node --experimental-strip-types src/main/run-server.ts",
