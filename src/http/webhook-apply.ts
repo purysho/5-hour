@@ -26,6 +26,7 @@
 
 import type { TenantClient } from "../db/client.ts";
 import type { AddedRepository, ForgeEvent, RepositoryRef } from "./webhook.ts";
+import { applyRepositoryLimit } from "../billing/limits.ts";
 
 export interface ApplyResult {
   readonly applied: boolean;
@@ -274,6 +275,21 @@ async function addRepositories(
     return { applied: false, detail: "no repositories in grant", auditAction: null };
   }
 
+  // The plan's repository limit. Enforced here rather than at detection time,
+  // so a customer learns at connect time that they are at their limit instead
+  // of discovering months later that some repositories were never covered.
+  const limited = await applyRepositoryLimit(client, repositories);
+  if (limited.accepted.length === 0) {
+    return {
+      applied: false,
+      detail:
+        `plan limit reached: ${limited.liveCount} of ${limited.limit} repositories in use, ` +
+        `${limited.refused.length} refused`,
+      auditAction: "repositories.refused",
+    };
+  }
+  repositories = limited.accepted;
+
   const { rows } = await client.query<{ id: string }>(
     `INSERT INTO repository
        (provider_id, installation_id, forge, forge_owner, forge_name,
@@ -300,9 +316,14 @@ async function addRepositories(
     ],
   );
 
+  const overLimit =
+    limited.refused.length > 0
+      ? `; ${limited.refused.length} refused, plan allows ${limited.limit}`
+      : "";
+
   return {
     applied: rows.length > 0,
-    detail: `${rows.length} repository(ies) recorded from grant`,
+    detail: `${rows.length} repository(ies) recorded from grant${overLimit}`,
     auditAction: "repositories.added",
   };
 }
